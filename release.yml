@@ -1,0 +1,121 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install PyMuPDF PyQt6 pyinstaller Pillow
+
+      - name: Generate icon
+        run: python tools/generate_icon.py
+
+      - name: Build exe with PyInstaller
+        run: |
+          pyinstaller --onefile --windowed --name ScrollReader --icon=assets/icon.ico scrollreader.py
+        continue-on-error: false
+
+      - name: Build Windows installer with NSIS
+        uses: joncloud/makensis-action@v4
+        with:
+          script-file: installer/windows/installer.nsi
+          arguments: /DVERSION=${{ github.ref_name }}
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: installer/windows/ScrollReader_Setup_*.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libglib2.0-0 libxcb-xinerama0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 \
+            libxkbcommon-x11-0 libdbus-1-3
+
+      - name: Install Python dependencies
+        run: |
+          pip install PyMuPDF PyQt6 pyinstaller Pillow
+
+      - name: Generate icon
+        run: python tools/generate_icon.py
+
+      - name: Build Linux binary
+        run: |
+          pyinstaller --onefile --name scrollreader scrollreader.py
+
+      - name: Make tarball
+        run: |
+          mkdir -p dist/scrollreader-linux
+          cp dist/scrollreader dist/scrollreader-linux/
+          cp README.md dist/scrollreader-linux/
+          cp LICENSE dist/scrollreader-linux/
+          tar -czf dist/scrollreader-linux-${{ github.ref_name }}.tar.gz \
+            -C dist scrollreader-linux
+
+      - name: Upload Linux binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-binary
+          path: dist/scrollreader-linux-*.tar.gz
+
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ScrollReader ${{ github.ref_name }}
+          body: |
+            ## ScrollReader ${{ github.ref_name }}
+
+            ### Downloads
+            - **Windows**: `ScrollReader_Setup_*.exe` — full installer with Start Menu shortcut and uninstaller
+            - **Linux**: `scrollreader-linux-*.tar.gz` — standalone binary, no Python needed
+
+            ### Install from source
+            ```bash
+            pip install PyMuPDF PyQt6
+            python scrollreader.py
+            ```
+
+            See [README](https://github.com/ampersandwichmaker/scrollreader#readme) for full command reference.
+          files: |
+            artifacts/windows-installer/*.exe
+            artifacts/linux-binary/*.tar.gz
+          draft: false
+          prerelease: false
