@@ -62,7 +62,7 @@ from typing import Optional, Callable
 
 import fitz
 from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QLineEdit
-from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui import (QPainter, QColor, QFont, QPixmap, QImage,
                           QKeyEvent, QPolygon, QWheelEvent, QMouseEvent,
                           QFontMetrics)
@@ -104,6 +104,7 @@ DEFAULT_CONFIG = {
     "library_recursive":     False,
     "library_swatch":        [],            # empty = use built-in swatch
     "read_tab_sizing":       "flat",
+    "eager_pages":           8,             # pages rendered synchronously around current position
 }
 
 ZOOM_MODES = ["fit-width", "fit-page", "50%", "75%", "100%"]
@@ -531,37 +532,114 @@ class LineInfo:
 
 class PDFDocument:
     def __init__(self, filepath, zoom=1.5, page_gap=30):
-        self.filepath = str(filepath)
-        self.zoom = zoom; self.page_gap = page_gap
-        self.doc = fitz.open(filepath)
-        self.page_pixmaps: list[QPixmap] = []
-        self.page_offsets: list[int]     = []
-        self.lines:        list[LineInfo] = []
+        self.filepath   = str(filepath)
+        self.zoom       = zoom
+        self.page_gap   = page_gap
+        self.doc        = fitz.open(filepath)
+        self.page_pixmaps: list[Optional[QPixmap]] = []  # None = not yet rendered
+        self.page_offsets: list[int]               = []
+        self.page_sizes:   list[tuple]             = []  # (w_px, h_px) at zoom
+        self.lines:        list[LineInfo]          = []
         self.total_height  = 0
         self.max_width     = 0
         first = self.doc[0].rect if self.doc else fitz.Rect(0,0,612,792)
         self.natural_width  = float(first.width)
         self.natural_height = float(first.height)
-        self._render()
+        self._parse()
 
-    def _render(self):
-        mat = fitz.Matrix(self.zoom, self.zoom)
-        cy  = 0
+    def _parse(self):
+        """Parse page geometry and extract text without rendering any pixels."""
+        cy = 0
         for pn, page in enumerate(self.doc):
-            pix    = page.get_pixmap(matrix=mat, alpha=False)
-            img    = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888)
-            pixmap = QPixmap.fromImage(img)
-            self.page_pixmaps.append(pixmap); self.page_offsets.append(cy)
-            self.max_width = max(self.max_width, pixmap.width())
+            r   = page.rect
+            w   = int(r.width  * self.zoom)
+            h   = int(r.height * self.zoom)
+            self.page_sizes.append((w, h))
+            self.page_offsets.append(cy)
+            self.page_pixmaps.append(None)   # placeholder
+            self.max_width = max(self.max_width, w)
+
             for block in page.get_text("dict")["blocks"]:
                 if block.get("type") != 0: continue
                 for line in block.get("lines", []):
                     text = " ".join(s["text"] for s in line.get("spans",[])).strip()
                     if text:
-                        self.lines.append(LineInfo(cy + line["bbox"][1]*self.zoom, pn, text))
-            cy += pixmap.height() + self.page_gap
+                        self.lines.append(LineInfo(
+                            cy + line["bbox"][1] * self.zoom, pn, text))
+            cy += h + self.page_gap
+
         self.total_height = cy
         self.lines.sort(key=lambda l: l.abs_y)
+
+    def render_page(self, pn: int) -> QPixmap:
+        """Render a single page and cache it. Thread-safe for reading doc."""
+        mat = fitz.Matrix(self.zoom, self.zoom)
+        pix = self.doc[pn].get_pixmap(matrix=mat, alpha=False)
+        img = QImage(pix.samples, pix.width, pix.height,
+                     pix.stride, QImage.Format.Format_RGB888)
+        return QPixmap.fromImage(img)
+
+    def render_range(self, start: int, end: int):
+        """Render pages [start, end] synchronously."""
+        start = max(0, start)
+        end   = min(len(self.doc) - 1, end)
+        for pn in range(start, end + 1):
+            if self.page_pixmaps[pn] is None:
+                self.page_pixmaps[pn] = self.render_page(pn)
+
+    def placeholder(self, pn: int) -> QPixmap:
+        """Grey placeholder pixmap for an unrendered page."""
+        w, h = self.page_sizes[pn]
+        pm   = QPixmap(w, h)
+        pm.fill(QColor(38, 38, 38))
+        return pm
+
+    def get_pixmap(self, pn: int) -> QPixmap:
+        """Return rendered pixmap or placeholder."""
+        pm = self.page_pixmaps[pn]
+        return pm if pm is not None else self.placeholder(pn)
+
+    @property
+    def page_count(self):
+        return len(self.doc)
+
+
+class RenderThread(QThread):
+    page_ready = pyqtSignal(int, QPixmap)
+
+    def __init__(self, document: PDFDocument, start_page: int):
+        super().__init__()
+        self.document   = document
+        self.start_page = start_page
+        self._cancel    = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        """Render pages outward from start_page, skipping already-rendered ones."""
+        n      = self.document.page_count
+        order  = _render_order(self.start_page, n)
+        for pn in order:
+            if self._cancel:
+                return
+            if self.document.page_pixmaps[pn] is None:
+                try:
+                    pm = self.document.render_page(pn)
+                    self.document.page_pixmaps[pn] = pm
+                    self.page_ready.emit(pn, pm)
+                except Exception:
+                    pass
+
+
+def _render_order(start: int, total: int) -> list[int]:
+    """Pages in outward spiral from start: start, start+1, start-1, start+2 ..."""
+    seen, order = set(), []
+    for delta in range(total):
+        for pn in [start + delta, start - delta]:
+            if 0 <= pn < total and pn not in seen:
+                seen.add(pn); order.append(pn)
+    return order
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +660,7 @@ class ReaderWidget(QWidget):
         self._panel_scroll: int        = 0     # scroll offset for panels
         self._pending: Optional[dict]  = None  # y/n confirmation
         self._panel_rects: list        = []    # [(QRect, line_index)] for click detection
+        self._render_thread: Optional[RenderThread] = None
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(600, 400)
@@ -630,19 +709,77 @@ class ReaderWidget(QWidget):
         filepath = os.path.expanduser(filepath)
         if not os.path.exists(filepath):
             self.status_text = f"file not found: {filepath}"; self.update(); return
+
+        # Cancel any in-progress render
+        self._stop_render_thread()
+
         try:
             zoom = self._compute_zoom(self.zoom_mode, peek_path=filepath)
-            self.document = PDFDocument(filepath, zoom=zoom, page_gap=int(self.config.get("page_gap")))
-            meta = self.document.doc.metadata
-            e = self.history._entry(filepath)
+            doc  = PDFDocument(filepath, zoom=zoom, page_gap=int(self.config.get("page_gap")))
+
+            # Metadata
+            meta = doc.doc.metadata
+            e    = self.history._entry(filepath)
             if meta.get("title")  and not e.get("title"):  e["title"]  = meta["title"]
             if meta.get("author") and not e.get("author"): e["author"] = meta["author"]
-            self.history.set_totals(filepath, len(self.document.lines), len(self.document.page_pixmaps))
-            self.current_line = min(self.history.get_line(filepath), max(0, len(self.document.lines)-1))
-            self.panel = None; self._pending = None
-            self._update_status(); self.update()
+            self.history.set_totals(filepath, len(doc.lines), doc.page_count)
+
+            self.document     = doc
+            self.current_line = min(self.history.get_line(filepath), max(0, len(doc.lines)-1))
+            self.panel        = None
+            self._pending     = None
+
+            # Synchronously render pages around current position
+            cur_page  = doc.lines[self.current_line].page_num if doc.lines else 0
+            eager     = int(self.config.get("eager_pages") or 8)
+            doc.render_range(cur_page - 2, cur_page + eager)
+
+            self._update_status()
+            self.update()
+
+            # Background-render the rest
+            self._start_render_thread(cur_page)
+
         except Exception as ex:
             self.status_text = f"error: {ex}"; self.update()
+
+    def _start_render_thread(self, start_page: int):
+        self._stop_render_thread()
+        t = RenderThread(self.document, start_page)
+        t.page_ready.connect(self._on_page_ready)
+        t.finished.connect(self._on_render_done)
+        self._render_thread = t
+        t.start()
+
+    def _stop_render_thread(self):
+        if self._render_thread is not None:
+            self._render_thread.cancel()
+            self._render_thread.wait(200)
+            self._render_thread = None
+
+    def _on_page_ready(self, pn: int, pixmap: QPixmap):
+        """Called from main thread when background renders a page."""
+        if self.document:
+            self.document.page_pixmaps[pn] = pixmap
+            # Only repaint if this page is currently visible
+            scroll = self._scroll_offset()
+            py     = STATUS_BAR_H + self.document.page_offsets[pn] - scroll
+            _, ph  = self.document.page_sizes[pn]
+            if py + ph >= STATUS_BAR_H and py <= self.height():
+                self.update()
+            # Update status to show render progress
+            rendered = sum(1 for p in self.document.page_pixmaps if p is not None)
+            total    = self.document.page_count
+            if rendered < total:
+                pct = f"{100*rendered//total}%"
+                self._update_status()
+                self.status_text += f"  —  rendering {pct}"
+                self.update()
+
+    def _on_render_done(self):
+        self._render_thread = None
+        self._update_status()
+        self.update()
 
     # ---------------------------------------------------------------- zoom
 
@@ -669,9 +806,7 @@ class ReaderWidget(QWidget):
         self.status_text = f"rendering [{self.zoom_mode}]…"
         self.update(); QApplication.processEvents()
         try:
-            self.document = PDFDocument(self.document.filepath,
-                                         zoom=self._compute_zoom(self.zoom_mode),
-                                         page_gap=int(self.config.get("page_gap")))
+            self.load_document(self.document.filepath)
             self.current_line = min(old, max(0, len(self.document.lines)-1))
             self._update_status()
         except Exception as ex:
@@ -714,7 +849,7 @@ class ReaderWidget(QWidget):
         self.status_text = (
             f"{Path(self.document.filepath).name}"
             f"  —  line {self.current_line+1}/{total} ({pct})"
-            f"  —  page {line.page_num+1}/{len(self.document.page_pixmaps)}"
+            f"  —  page {line.page_num+1}/{self.document.page_count}"
             f"  —  [{self.zoom_mode}]"
         )
 
@@ -727,7 +862,7 @@ class ReaderWidget(QWidget):
         return cur, cur
 
     def _resolve_page_range(self, rs: RangeSpec) -> tuple:
-        tp = len(self.document.page_pixmaps)
+        tp = self.document.page_count
         cp = self.document.lines[self.current_line].page_num if self.document.lines else 0
         if rs.mode == "current":   return cp, cp
         if rs.mode == "absolute":  return max(0, rs.start-1), min(tp-1, rs.end-1)
@@ -765,10 +900,11 @@ class ReaderWidget(QWidget):
         total  = len(dlines)
 
         # Pages
-        for i, pixmap in enumerate(self.document.page_pixmaps):
+        for i in range(self.document.page_count):
             py = STATUS_BAR_H + self.document.page_offsets[i] - scroll
-            if py + pixmap.height() >= STATUS_BAR_H and py <= self.height():
-                painter.drawPixmap(px, int(py), pixmap)
+            pw, ph = self.document.page_sizes[i]
+            if py + ph >= STATUS_BAR_H and py <= self.height():
+                painter.drawPixmap(px, int(py), self.document.get_pixmap(i))
 
         # Saved highlights (blue)
         sh_col = QColor(self._cfg("saved_highlight_color") or "#4488ff")
@@ -1227,7 +1363,7 @@ class ReaderWidget(QWidget):
     def _jump_pages(self, direction):
         if not self.document or not self.document.lines: return
         cp = self.document.lines[self.current_line].page_num
-        tp = max(0, min(len(self.document.page_pixmaps)-1, cp+direction))
+        tp = max(0, min(self.document.page_count-1, cp+direction))
         for i, l in enumerate(self.document.lines):
             if l.page_num == tp: self.current_line = i; break
         self.history.set_line(self.document.filepath, self.current_line)
@@ -1348,7 +1484,7 @@ class ReaderWidget(QWidget):
             self._update_status(); self.update(); return f"line {self.current_line+1}"
 
         if cmd == "goto_page":
-            pg = max(0, min(len(doc.page_pixmaps)-1, p["page"]-1))
+            pg = max(0, min(doc.page_count-1, p["page"]-1))
             for i, l in enumerate(lines):
                 if l.page_num == pg: self.current_line = i; break
             self.history.set_line(doc.filepath, self.current_line)
@@ -1445,7 +1581,7 @@ class ReaderWidget(QWidget):
 
         # ── Print ─────────────────────────────────────────────────────────
         if cmd == "print_dialog":
-            return self._do_print(0, len(doc.page_pixmaps)-1, show_dialog=True)
+            return self._do_print(0, doc.page_count-1, show_dialog=True)
 
         if cmd == "print_pages":
             rs = p.get("range", RangeSpec("current"))
@@ -1527,7 +1663,7 @@ class ReaderWidget(QWidget):
             # Honour page range from dialog if the user set one
             if printer.printRange() == QPrinter.PrintRange.PageRange:
                 start_page = max(0, printer.fromPage() - 1)
-                end_page   = min(len(self.document.page_pixmaps) - 1, printer.toPage() - 1)
+                end_page   = min(self.document.page_count - 1, printer.toPage() - 1)
 
         self.status_text = f"printing pages {start_page+1}–{end_page+1}…"
         self.update(); QApplication.processEvents()
