@@ -27,6 +27,9 @@ jobs:
         run: |
           pyinstaller --onefile --windowed --name ScrollReader --icon=assets/icon.ico scrollreader.py
 
+      - name: Install NSIS
+        run: choco install nsis --yes
+
       - name: Build Windows installer with NSIS
         uses: joncloud/makensis-action@v4
         with:
