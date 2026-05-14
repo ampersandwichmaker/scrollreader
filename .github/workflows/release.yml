@@ -107,10 +107,10 @@ jobs:
             - **Linux**: `scrollreader-linux-*.tar.gz` — standalone binary, no Python needed
 
             ### Install from source
-```bash
-            pip install PyMuPDF PyQt6
-            python scrollreader.py
-```
+            Install with pip and run directly:
+
+                pip install PyMuPDF PyQt6
+                python scrollreader.py
 
             See [README](https://github.com/ampersandwichmaker/scrollreader#readme) for full command reference.
           files: |
