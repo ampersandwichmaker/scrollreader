@@ -62,9 +62,10 @@ from typing import Optional, Callable
 
 import fitz
 from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QLineEdit
-from PyQt6.QtCore import Qt, QPoint, QRect, QTimer
+from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, pyqtSignal
 from PyQt6.QtGui import (QPainter, QColor, QFont, QPixmap, QImage,
-                          QKeyEvent, QPolygon, QWheelEvent, QMouseEvent)
+                          QKeyEvent, QPolygon, QWheelEvent, QMouseEvent,
+                          QFontMetrics)
 try:
     from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
     HAS_PRINT = True
@@ -97,8 +98,12 @@ DEFAULT_CONFIG = {
     "statusbar_color":       "#111111",
     "statusbar_text_color":  "#888888",
     "page_gap":              30,
-    "export_dir":            "",            # empty = same folder as PDF
-    "export_mode":           "timestamped", # "timestamped" or "running"
+    "export_dir":            "",
+    "export_mode":           "timestamped",
+    "library_dir":           "",
+    "library_recursive":     False,
+    "library_swatch":        [],            # empty = use built-in swatch
+    "read_tab_sizing":       "flat",
 }
 
 ZOOM_MODES = ["fit-width", "fit-page", "50%", "75%", "100%"]
@@ -446,6 +451,11 @@ class History:
         if "notes"      in kinds: result["notes"]      = [n for n in e["notes"]      if l_touch(n["line"])]
         if "highlights" in kinds: result["highlights"] = [h for h in e["highlights"] if r_touch(h["start_line"], h["end_line"])]
         return result
+
+    def set_favorite(self, filepath: str, val: bool) -> str:
+        self._entry(filepath)["favorite"] = val
+        self._save()
+        return ("★ added to favorites" if val else "removed from favorites")
 
     def last_file(self) -> Optional[str]:
         if not self.data:
@@ -1262,6 +1272,14 @@ class ReaderWidget(QWidget):
         if cmd == "open":
             if len(parts) < 2: return "usage: open <path>"
             self.load_document(" ".join(parts[1:])); return None
+        if cmd in ("lib", "library"):
+            self.window().show_library(); return None
+        if cmd == "fav":
+            if not self.document: return "no document open"
+            return self.history.set_favorite(self.document.filepath, True)
+        if cmd == "unfav":
+            if not self.document: return "no document open"
+            return self.history.set_favorite(self.document.filepath, False)
         if cmd == "zoom":
             if len(parts) < 2: return f"zoom: {self.zoom_mode}  options: {', '.join(ZOOM_MODES+['cycle'])}"
             return self._do_zoom(parts[1].strip())
@@ -1540,6 +1558,687 @@ class ReaderWidget(QWidget):
         count = end_page - start_page + 1
         return f"sent {count} page{'s' if count > 1 else ''} to printer"
 
+# Library Widget
+# ---------------------------------------------------------------------------
+
+LIBRARY_TABS   = ["READING", "UNREAD", "FAVORITES", "ABANDONED", "READ", "SETTINGS"]
+TAB_H          = 38
+TAG_BAR_H      = 36
+LIB_STATUS_H   = 24
+
+DEFAULT_SWATCH = [
+    "#c0392b", "#8e44ad", "#2980b9", "#16a085",
+    "#d35400", "#27ae60", "#2c3e50", "#7f8c8d",
+    "#6c3483", "#1a5276",
+]
+
+STATUS_SAT = {
+    "reading":   1.0,
+    "unread":    0.7,
+    "favorites": 1.0,
+    "abandoned": 0.18,
+    "read":      1.0,
+}
+
+
+def _adjust_sat(hex_color: str, factor: float) -> QColor:
+    c = QColor(hex_color)
+    h, s, v, a = c.getHsvF()
+    c.setHsvF(h, min(1.0, s * factor), v, a)
+    return c
+
+
+def _scan_pdfs(directory: str, recursive: bool = False) -> list[str]:
+    p = Path(directory)
+    if not p.exists():
+        return []
+    if recursive:
+        return [str(f) for f in p.rglob("*.pdf")]
+    else:
+        return [str(f) for f in p.glob("*.pdf")]
+
+
+def _default_lib_dir() -> str:
+    if sys.platform.startswith("win"):
+        return str(Path(sys.executable).parent)
+    return str(Path.home())
+
+
+class LibraryWidget(QWidget):
+    """
+    Full-screen overlay library browser.
+    Opened via 'lib' / 'library' command. Closed via Esc.
+    Emits open_book(filepath) signal when a book is clicked.
+    """
+    open_book = pyqtSignal(str)
+
+    def __init__(self, config: Config, history: History, parent=None):
+        super().__init__(parent)
+        self.config  = config
+        self.history = history
+        self.tab     = "READING"
+        self.scroll  = 0
+        self.active_tag: Optional[str] = None
+        self._book_rects: list         = []  # [(QRect, filepath)]
+        self._tab_rects:  list         = []  # [(QRect, tab_name)]
+        self._tag_rects:  list         = []  # [(QRect, tag)]
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet("background: transparent;")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        # Command bar (shared style with ReaderWidget)
+        self._cmd_mode    = False
+        self._cmd_cooldown = 0.0
+        self.cmd = QLineEdit(self)
+        self.cmd.setVisible(False)
+        self.cmd.installEventFilter(self)
+        self.cmd.setStyleSheet("""
+            QLineEdit {
+                background-color: #1e1e1e; color: #e0e0e0;
+                border: none; border-top: 1px solid #333;
+                padding: 3px 10px;
+                font-family: "Courier New", monospace; font-size: 13px;
+                selection-background-color: #444;
+            }
+        """)
+        self.status_msg = ""
+
+    def resizeEvent(self, ev):
+        self.cmd.setGeometry(0, self.height() - 26, self.width(), 26)
+        super().resizeEvent(ev)
+
+    def showEvent(self, ev):
+        self.scroll = 0
+        self._refresh_books()
+        self.setFocus()
+        super().showEvent(ev)
+
+    # ---------------------------------------------------------------- data
+
+    def _refresh_books(self):
+        """Scan library dir and merge with history."""
+        lib_dir   = self.config.get("library_dir") or _default_lib_dir()
+        recursive = bool(self.config.get("library_recursive") or False)
+        found     = _scan_pdfs(lib_dir, recursive)
+        # Ensure scanned files exist in history
+        for fp in found:
+            self.history._entry(fp)  # creates default entry if missing
+
+    def _all_books(self) -> list[dict]:
+        """Return list of enriched book dicts from history."""
+        books = []
+        for fp, e in self.history.data.items():
+            if not os.path.exists(fp):
+                continue
+            color = e.get("library_color")
+            if not color:
+                swatch = self.config.get("library_swatch") or DEFAULT_SWATCH
+                if isinstance(swatch, str):
+                    try: swatch = json.loads(swatch)
+                    except: swatch = DEFAULT_SWATCH
+                color = swatch[hash(fp) % len(swatch)]
+                e["library_color"] = color
+                self.history._save()
+            books.append({
+                "filepath":  fp,
+                "title":     e.get("title") or Path(fp).stem,
+                "author":    e.get("author") or "",
+                "status":    e.get("status") or "unread",
+                "rating":    e.get("rating") or 0,
+                "tags":      e.get("tags") or [],
+                "favorite":  bool(e.get("favorite")),
+                "line":      e.get("line") or 0,
+                "total":     e.get("total_lines") or 1,
+                "notes":     len(e.get("notes", [])),
+                "bookmarks": len(e.get("bookmarks", [])),
+                "highlights":len(e.get("highlights", [])),
+                "color":     color,
+            })
+        return books
+
+    def _books_for_tab(self, tab: str) -> list[dict]:
+        books = self._all_books()
+        if self.active_tag:
+            books = [b for b in books if self.active_tag in b["tags"]]
+        if tab == "READING":
+            books = [b for b in books if b["status"] == "reading"]
+            books.sort(key=lambda b: b["line"] / max(b["total"], 1), reverse=True)
+        elif tab == "UNREAD":
+            books = [b for b in books if b["status"] == "unread"]
+            books.sort(key=lambda b: b["total"], reverse=True)
+        elif tab == "FAVORITES":
+            books = [b for b in books if b["favorite"]]
+            books.sort(key=lambda b: b["line"] / max(b["total"], 1), reverse=True)
+        elif tab == "ABANDONED":
+            books = [b for b in books if b["status"] == "abandoned"]
+            books.sort(key=lambda b: b["line"] / max(b["total"], 1), reverse=True)
+        elif tab == "READ":
+            books = [b for b in books if b["status"] == "read"]
+            books.sort(key=lambda b: b.get("title","").lower())
+        return books
+
+    def _all_tags(self) -> list[str]:
+        tags = set()
+        for b in self._all_books():
+            tags.update(b["tags"])
+        return sorted(tags)
+
+    # --------------------------------------------------------------- paint
+
+    def paintEvent(self, ev):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w, h = self.width(), self.height()
+
+        # Dimmed background (PDF showing through)
+        painter.fillRect(0, 0, w, h, QColor(0, 0, 0, 185))
+
+        # Main panel background
+        panel_y = 0
+        painter.fillRect(0, panel_y, w, h, QColor(18, 18, 18, 240))
+
+        # Tabs
+        self._tab_rects = []
+        self._paint_tabs(painter, w)
+
+        # Content area
+        content_y = panel_y + TAB_H * 2 + 4
+        content_h = h - content_y - TAG_BAR_H - LIB_STATUS_H - (26 if self._cmd_mode else 0)
+
+        if self.tab == "SETTINGS":
+            self._paint_settings(painter, 0, content_y, w, content_h)
+        elif self.tab == "READ":
+            self._paint_read_tab(painter, 0, content_y, w, content_h)
+        else:
+            self._paint_blocks(painter, 0, content_y, w, content_h)
+
+        # Tag bar
+        tag_y = h - TAG_BAR_H - LIB_STATUS_H - (26 if self._cmd_mode else 0)
+        self._paint_tag_bar(painter, 0, tag_y, w)
+
+        # Status bar
+        stat_y = h - LIB_STATUS_H - (26 if self._cmd_mode else 0)
+        self._paint_lib_status(painter, 0, stat_y, w)
+
+    def _paint_tabs(self, painter: QPainter, w: int):
+        tabs_per_row = 3
+        tw = w // tabs_per_row
+        mono_b = QFont("Courier New", 10, QFont.Weight.Bold)
+        painter.setFont(mono_b)
+
+        for i, tab in enumerate(LIBRARY_TABS):
+            row = i // tabs_per_row
+            col = i  % tabs_per_row
+            x   = col * tw
+            y   = row * TAB_H
+            rect = QRect(x, y, tw - 2, TAB_H - 2)
+            self._tab_rects.append((rect, tab))
+
+            active = tab == self.tab
+            bg = QColor("#2a5a8a") if active else QColor("#1a2a3a")
+            painter.fillRect(rect, bg)
+            painter.setPen(QColor("#88ccff") if active else QColor("#446688"))
+            painter.drawRect(rect)
+            painter.setPen(QColor("#ffffff") if active else QColor("#88aacc"))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, tab)
+
+    def _paint_blocks(self, painter: QPainter, x: int, y: int, w: int, h: int):
+        self._book_rects = []
+        books = self._books_for_tab(self.tab)
+        if not books:
+            painter.setPen(QColor("#444444"))
+            painter.setFont(QFont("Courier New", 13))
+            painter.drawText(QRect(x, y, w, h), Qt.AlignmentFlag.AlignCenter,
+                             f"No books in {self.tab.lower()}")
+            return
+
+        sat = STATUS_SAT.get(self.tab.lower(), 1.0)
+        total_lines = sum(max(b["total"] - b["line"], 1) for b in books)
+        usable_h    = h - 8
+        min_h       = 80
+        padding     = 6
+
+        # Treemap-ish: pack into rows
+        # Simple proportional layout: each book gets width proportional to remaining lines
+        # Pack left-to-right, wrap into rows
+        row_items: list[list] = []
+        row: list = []
+        row_lines = 0
+        for b in books:
+            remaining = max(b["total"] - b["line"], 1)
+            row.append((b, remaining))
+            row_lines += remaining
+            frac = row_lines / max(total_lines, 1)
+            if frac >= 0.25 or b is books[-1]:
+                row_items.append((row[:], row_lines))
+                row = []; row_lines = 0
+
+        # Distribute rows evenly across available height
+        n_rows   = max(len(row_items), 1)
+        row_h    = max(min_h, (usable_h - padding * (n_rows + 1)) // n_rows)
+        cur_y    = y + padding - self.scroll
+
+        mono     = QFont("Courier New", 9)
+        mono_b   = QFont("Courier New", 9, QFont.Weight.Bold)
+
+        for row, row_lines in row_items:
+            cur_x = x + padding
+            for b, remaining in row:
+                frac   = remaining / max(row_lines, 1)
+                bw     = max(120, int((w - padding * (len(row) + 1)) * frac))
+                bh     = row_h
+                rect   = QRect(cur_x, cur_y, bw, bh)
+
+                if cur_y + bh > y and cur_y < y + h:
+                    color = _adjust_sat(b["color"], sat)
+                    dark  = QColor(0, 0, 0, 120)
+
+                    # Block background
+                    painter.fillRect(rect, color)
+                    painter.fillRect(rect, dark)
+
+                    # Left accent bar
+                    accent = _adjust_sat(b["color"], min(sat * 1.3, 1.0))
+                    painter.fillRect(QRect(cur_x, cur_y, 4, bh), accent)
+
+                    # Favorite star
+                    if b["favorite"]:
+                        painter.setPen(QColor("#ffdd00"))
+                        painter.setFont(QFont("Courier New", 10))
+                        painter.drawText(QRect(cur_x + bw - 20, cur_y + 4, 16, 16),
+                                         Qt.AlignmentFlag.AlignCenter, "★")
+
+                    # Text content
+                    fm    = QFontMetrics(mono_b)
+                    inner = QRect(cur_x + 10, cur_y + 8, bw - 20, bh - 16)
+                    line_h = 16
+
+                    progress = b["line"] / max(b["total"], 1)
+                    pct_str  = f"{int(progress*100)}%"
+                    metar    = f"N{b['notes']}B{b['bookmarks']}H{b['highlights']}"
+
+                    lines_text = [
+                        (b["title"],  mono_b, QColor("#ffffff")),
+                        (b["author"], mono,   QColor("#aaaaaa")),
+                        (f"PROG {pct_str}", mono, QColor("#88ccaa")),
+                        (metar,       mono,   QColor("#8899aa")),
+                    ]
+
+                    ty = inner.top()
+                    for txt, font, col in lines_text:
+                        if ty + line_h > inner.bottom(): break
+                        painter.setFont(font)
+                        painter.setPen(col)
+                        elided = QFontMetrics(font).elidedText(
+                            txt, Qt.TextElideMode.ElideRight, inner.width())
+                        painter.drawText(cur_x + 10, ty + line_h - 2, elided)
+                        ty += line_h
+
+                    # Border
+                    painter.setPen(QColor(255, 255, 255, 25))
+                    painter.drawRect(rect)
+
+                    self._book_rects.append((rect, b["filepath"]))
+
+                cur_x += bw + padding
+            cur_y += row_h + padding
+
+    def _paint_read_tab(self, painter: QPainter, x: int, y: int, w: int, h: int):
+        self._book_rects = []
+        books = self._books_for_tab("READ")
+        use_size = self.config.get("read_tab_sizing") == "lines"
+
+        if not books:
+            painter.setPen(QColor("#444444"))
+            painter.setFont(QFont("Courier New", 13))
+            painter.drawText(QRect(x, y, w, h), Qt.AlignmentFlag.AlignCenter,
+                             "No finished books yet")
+            return
+
+        mono   = QFont("Courier New", 9)
+        mono_b = QFont("Courier New", 9, QFont.Weight.Bold)
+        bar_h  = 28
+        pad    = 3
+        cur_y  = y + pad - self.scroll
+
+        if use_size:
+            # Variable height by total line count
+            total = sum(b["total"] for b in books)
+            for b in books:
+                bh    = max(bar_h, int(h * b["total"] / max(total, 1)))
+                rect  = QRect(x + pad, cur_y, w - pad*2, bh)
+                self._paint_read_bar(painter, rect, b, mono, mono_b, full=True)
+                self._book_rects.append((rect, b["filepath"]))
+                cur_y += bh + pad
+        else:
+            # Flat bars
+            for b in books:
+                rect = QRect(x + pad, cur_y, w - pad*2, bar_h)
+                self._paint_read_bar(painter, rect, b, mono, mono_b, full=False)
+                self._book_rects.append((rect, b["filepath"]))
+                cur_y += bar_h + pad
+
+    def _paint_read_bar(self, painter, rect, b, mono, mono_b, full=False):
+        color = _adjust_sat(b["color"], 0.6)
+        dark  = QColor(0, 0, 0, 140)
+        painter.fillRect(rect, QColor(28, 28, 28))
+        painter.fillRect(QRect(rect.x(), rect.y(), 4, rect.height()), color)
+
+        if full:
+            painter.fillRect(rect, dark)
+
+        metar = f"N{b['notes']}B{b['bookmarks']}H{b['highlights']}"
+        stars = "★" * (b["rating"] or 0) + "☆" * (5 - (b["rating"] or 0))
+
+        painter.setPen(QColor("#ffffff"))
+        painter.setFont(mono_b)
+        painter.drawText(rect.x() + 12, rect.y() + 18, b["title"][:40])
+
+        painter.setPen(QColor("#888888"))
+        painter.setFont(mono)
+        mid_x = rect.x() + rect.width() // 3
+        painter.drawText(mid_x, rect.y() + 18, b["author"][:30])
+
+        right_x = rect.x() + rect.width() - 220
+        painter.drawText(right_x, rect.y() + 18, metar)
+
+        painter.setPen(QColor("#ffdd00"))
+        painter.drawText(rect.x() + rect.width() - 90, rect.y() + 18, stars)
+
+        painter.setPen(QColor(255, 255, 255, 20))
+        painter.drawRect(rect)
+
+    def _paint_settings(self, painter: QPainter, x: int, y: int, w: int, h: int):
+        mono   = QFont("Courier New", 10)
+        mono_b = QFont("Courier New", 10, QFont.Weight.Bold)
+        head   = QFont("Courier New", 10, QFont.Weight.Bold)
+
+        settings_ref = [
+            ("LIBRARY", [
+                ("library_dir",       self.config.get("library_dir") or _default_lib_dir(),
+                 "set library_dir <path>",       "Root folder scanned for PDFs"),
+                ("library_recursive", str(self.config.get("library_recursive") or False),
+                 "set library_recursive true",   "Scan subdirectories too"),
+                ("read_tab_sizing",   self.config.get("read_tab_sizing") or "flat",
+                 "set read_tab_sizing lines",    "Read tab: 'flat' (default) or 'lines'"),
+            ]),
+            ("APPEARANCE", [
+                ("background_color",      self.config.get("background_color"),
+                 "set background_color #1a1a1a",  "Main background"),
+                ("statusbar_color",       self.config.get("statusbar_color"),
+                 "set statusbar_color #111111",   "Status bar background"),
+                ("statusbar_text_color",  self.config.get("statusbar_text_color"),
+                 "set statusbar_text_color #888", "Status bar text"),
+                ("indicator_color",       self.config.get("indicator_color"),
+                 "set indicator_color #ff4444",   "Current-line indicator"),
+                ("highlight_alpha",       str(self.config.get("highlight_alpha")),
+                 "set highlight_alpha 35",         "Highlight opacity (0–255)"),
+                ("highlight_height",      str(self.config.get("highlight_height")),
+                 "set highlight_height 20",        "Highlight band height px"),
+            ]),
+            ("BOOK SWATCH", [
+                ("library_swatch",   str(self.config.get("library_swatch") or DEFAULT_SWATCH),
+                 "set library_swatch [\"#hex\",...] ", "JSON list of color hex codes"),
+            ]),
+            ("EXPORT", [
+                ("export_dir",   self.config.get("export_dir") or "(same as PDF)",
+                 "set export_dir ~/exports",     "Export destination"),
+                ("export_mode",  self.config.get("export_mode") or "timestamped",
+                 "set export_mode running",      "timestamped or running"),
+            ]),
+            ("READING", [
+                ("reopen_last",  str(self.config.get("reopen_last")),
+                 "set reopen_last true",   "Auto-reopen last book"),
+                ("midpoint",     str(self.config.get("midpoint")),
+                 "set midpoint 0.42",      "Indicator lock position (0–1)"),
+                ("zoom_mode",    str(self.config.get("zoom_mode")),
+                 "set zoom_mode fit-width","Default zoom mode"),
+                ("page_gap",     str(self.config.get("page_gap")),
+                 "set page_gap 30",        "Gap between pages (px)"),
+            ]),
+        ]
+
+        cur_y   = y + 12 - self.scroll
+        lh_head = 26
+        lh_row  = 20
+        col2    = 200
+        col3    = 420
+        col4    = 640
+
+        painter.setClipRect(QRect(x, y, w, h))
+        for section, rows in settings_ref:
+            if cur_y > y + h: break
+
+            # Section header
+            painter.fillRect(QRect(x, cur_y, w, lh_head), QColor(28, 35, 45))
+            painter.setPen(QColor("#cc8844"))
+            painter.setFont(head)
+            painter.drawText(x + 16, cur_y + lh_head - 6, section)
+            cur_y += lh_head + 2
+
+            painter.setFont(mono)
+            for key, val, cmd, desc in rows:
+                if cur_y + lh_row > y + h: break
+                # Key
+                painter.setPen(QColor("#ddaa55"))
+                painter.setFont(mono_b)
+                painter.drawText(x + 16, cur_y + lh_row - 5, key)
+                # Value
+                painter.setPen(QColor("#88ddaa"))
+                painter.setFont(mono)
+                elided_val = QFontMetrics(mono).elidedText(
+                    str(val), Qt.TextElideMode.ElideRight, col3 - col2 - 10)
+                painter.drawText(x + col2, cur_y + lh_row - 5, elided_val)
+                # Command
+                painter.setPen(QColor("#666688"))
+                painter.drawText(x + col3, cur_y + lh_row - 5, cmd)
+                # Description
+                painter.setPen(QColor("#556655"))
+                painter.drawText(x + col4, cur_y + lh_row - 5, desc)
+                cur_y += lh_row
+
+            cur_y += 8
+
+        painter.setClipping(False)
+
+    def _paint_tag_bar(self, painter: QPainter, x: int, y: int, w: int):
+        self._tag_rects = []
+        painter.fillRect(QRect(x, y, w, TAG_BAR_H), QColor(14, 14, 14))
+        painter.setPen(QColor("#2a2a2a"))
+        painter.drawLine(x, y, x + w, y)
+
+        tags   = self._all_tags()
+        mono_b = QFont("Courier New", 9, QFont.Weight.Bold)
+        painter.setFont(mono_b)
+        cx = x + 10
+        ty = y + TAG_BAR_H // 2 + 5
+
+        # "ALL" pill
+        all_active = self.active_tag is None
+        self._draw_tag_pill(painter, cx, y + 4, "ALL", all_active, "#336655")
+        all_w = QFontMetrics(mono_b).horizontalAdvance("ALL") + 20
+        self._tag_rects.append((QRect(cx, y + 4, all_w, TAG_BAR_H - 8), None))
+        cx += all_w + 8
+
+        for tag in tags:
+            active = tag == self.active_tag
+            pill_w = QFontMetrics(mono_b).horizontalAdvance(tag) + 20
+            if cx + pill_w > w - 10: break
+            self._draw_tag_pill(painter, cx, y + 4, tag, active, "#334466")
+            self._tag_rects.append((QRect(cx, y + 4, pill_w, TAG_BAR_H - 8), tag))
+            cx += pill_w + 8
+
+    def _draw_tag_pill(self, painter, x, y, text, active, color_hex):
+        mono_b = QFont("Courier New", 9, QFont.Weight.Bold)
+        fm     = QFontMetrics(mono_b)
+        pw     = fm.horizontalAdvance(text) + 20
+        ph     = TAG_BAR_H - 8
+        bg     = QColor(color_hex) if active else QColor(30, 30, 30)
+        painter.fillRect(QRect(x, y, pw, ph), bg)
+        painter.setPen(QColor("#aaccaa") if active else QColor("#446644"))
+        painter.drawRect(QRect(x, y, pw, ph))
+        painter.setPen(QColor("#ffffff") if active else QColor("#778877"))
+        painter.setFont(mono_b)
+        painter.drawText(QRect(x, y, pw, ph), Qt.AlignmentFlag.AlignCenter, text)
+
+    def _paint_lib_status(self, painter: QPainter, x: int, y: int, w: int):
+        painter.fillRect(QRect(x, y, w, LIB_STATUS_H), QColor(14, 14, 14))
+        painter.setPen(QColor("#2a2a2a"))
+        painter.drawLine(x, y, x + w, y)
+        painter.setPen(QColor("#446644"))
+        painter.setFont(QFont("Courier New", 9))
+        books = self._books_for_tab(self.tab)
+        msg   = self.status_msg or (f"{len(books)} book(s)  —  Enter: command mode  —  Esc: close library  —  click to open")
+        painter.drawText(x + 12, y + LIB_STATUS_H - 6, msg)
+
+    # --------------------------------------------------------------- input
+
+    def eventFilter(self, obj, event):
+        from PyQt6.QtCore import QEvent
+        if obj is self.cmd and event.type() == QEvent.Type.KeyPress:
+            k = event.key()
+            if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._execute_command()
+                return True
+            if k == Qt.Key.Key_Escape:
+                self._exit_command_mode()
+                return True
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, ev: QKeyEvent):
+        k = ev.key()
+
+        if self._cmd_mode:
+            if k == Qt.Key.Key_Escape:
+                self._exit_command_mode()
+            return
+
+        if k == Qt.Key.Key_Escape:
+            self.hide()
+            return
+
+        if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if time.time() > self._cmd_cooldown:
+                self._enter_command_mode()
+            return
+
+        if k == Qt.Key.Key_Down:
+            self.scroll += 40; self.update()
+        elif k == Qt.Key.Key_Up:
+            self.scroll = max(0, self.scroll - 40); self.update()
+        elif k == Qt.Key.Key_PageDown:
+            self.scroll += self.height() - 160; self.update()
+        elif k == Qt.Key.Key_PageUp:
+            self.scroll = max(0, self.scroll - (self.height() - 160)); self.update()
+
+    def wheelEvent(self, ev: QWheelEvent):
+        delta = ev.angleDelta().y()
+        if delta:
+            self.scroll = max(0, self.scroll - delta // 3)
+            self.update()
+
+    def mousePressEvent(self, ev: QMouseEvent):
+        if ev.button() != Qt.MouseButton.LeftButton:
+            return
+        pos = ev.pos()
+
+        # Tab clicks
+        for rect, tab in self._tab_rects:
+            if rect.contains(pos):
+                self.tab    = tab
+                self.scroll = 0
+                self.status_msg = ""
+                self._refresh_books()
+                self.update()
+                return
+
+        # Tag clicks
+        for rect, tag in self._tag_rects:
+            if rect.contains(pos):
+                self.active_tag = tag  # None = ALL
+                self.scroll = 0
+                self.update()
+                return
+
+        # Book clicks
+        for rect, fp in self._book_rects:
+            if rect.contains(pos):
+                self.hide()
+                self.open_book.emit(fp)
+                return
+
+    # ------------------------------------------------- command mode
+
+    def _enter_command_mode(self):
+        self._cmd_mode = True
+        self.cmd.setVisible(True)
+        self.cmd.setText(":")
+        self.cmd.setFocus()
+        self.cmd.setCursorPosition(len(self.cmd.text()))
+
+    def _exit_command_mode(self):
+        self._cmd_mode = False
+        self._cmd_cooldown = time.time() + 0.15
+        self.cmd.setVisible(False)
+        self.cmd.clear()
+        self.setFocus()
+        self.update()
+
+    def _execute_command(self):
+        raw = self.cmd.text().lstrip(":").strip()
+        self._exit_command_mode()
+        if not raw:
+            return
+        result = self._run_lib_cmd(raw)
+        if result:
+            self.status_msg = result
+            self.update()
+
+    def _run_lib_cmd(self, text: str) -> Optional[str]:
+        parts = text.split(None, 2)
+        if not parts:
+            return None
+        cmd = parts[0].lower()
+
+        if cmd == "set":
+            if len(parts) < 3:
+                return "usage: set <key> <value>"
+            result = self.config.set(parts[1], parts[2])
+            self._refresh_books()
+            self.update()
+            return result
+
+        if cmd == "rescan":
+            self._refresh_books()
+            self.update()
+            return f"scanned {self.config.get('library_dir') or _default_lib_dir()}"
+
+        if cmd in ("help", "?", "man"):
+            return "commands: set <key> <val>  rescan  fav  unfav  q"
+
+        if cmd == "fav":
+            fp = self._current_fp()
+            if not fp: return "open a book first"
+            return self.history.set_favorite(fp, True)
+
+        if cmd == "unfav":
+            fp = self._current_fp()
+            if not fp: return "open a book first"
+            return self.history.set_favorite(fp, False)
+
+        if cmd in ("q", "quit", "exit"):
+            self.hide()
+            return None
+
+        return f"unknown: {cmd}"
+
+    def _current_fp(self) -> Optional[str]:
+        """Get filepath of currently open book from parent reader."""
+        try:
+            return self.parent().reader.document.filepath
+        except Exception:
+            return None
 class MainWindow(QMainWindow):
     def __init__(self, config: Config, history: History, initial_file=None):
         super().__init__()
@@ -1550,6 +2249,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.reader)
         self.reader.setFocus()
 
+        # Library overlay
+        self.library = LibraryWidget(config, history, parent=self)
+        self.library.hide()
+        self.library.open_book.connect(self.reader.load_document)
+
         load_path = initial_file
         if not load_path and config.get("reopen_last"):
             last = history.last_file()
@@ -1558,6 +2262,25 @@ class MainWindow(QMainWindow):
         if load_path:
             path = load_path
             QTimer.singleShot(80, lambda: self.reader.load_document(path))
+
+    def show_library(self):
+        try:
+            cw = self.centralWidget()
+            # Map central widget rect to MainWindow coordinates
+            tl = cw.mapTo(self, cw.rect().topLeft())
+            self.library.setGeometry(tl.x(), tl.y(), cw.width(), cw.height())
+            self.library._refresh_books()
+            self.library.show()
+            self.library.raise_()
+            self.library.setFocus()
+        except Exception as ex:
+            self.reader.status_text = f"library error: {ex}"
+            self.reader.update()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        if self.library.isVisible():
+            self.library.setGeometry(self.centralWidget().geometry())
 
 
 def main():
@@ -1573,3 +2296,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ---------------------------------------------------------------------------
