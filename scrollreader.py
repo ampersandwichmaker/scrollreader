@@ -3110,12 +3110,11 @@ class LibraryWidget(QWidget):
         ]
 
         cur_y   = y + 12
-        lh_head = 26
+        lh_head = 28
         lh_row  = 22
         col1    = x + 16        # key name
-        col2    = x + 220       # current value
-        col3    = x + 420       # set command
-        col4    = x + 700       # description
+        col2    = x + 240       # current value  
+        col3    = x + 460       # set command + description combined
 
         painter.setClipRect(QRect(x, y, w, h))
         for section, rows in settings_ref:
@@ -3131,20 +3130,22 @@ class LibraryWidget(QWidget):
             painter.setFont(mono)
             for key, val, cmd, desc in rows:
                 if cur_y + lh_row > y + h: break
+                # Key
                 painter.setPen(AMBER)
                 painter.setFont(mono_b)
                 painter.drawText(col1, cur_y + lh_row - 5, key)
+                # Value (elided to fit column)
                 painter.setPen(AMBER_DIM)
                 painter.setFont(mono)
                 elided_val = QFontMetrics(mono).elidedText(
-                    str(val), Qt.TextElideMode.ElideRight, col3 - col2 - 10)
+                    str(val), Qt.TextElideMode.ElideRight, col3 - col2 - 16)
                 painter.drawText(col2, cur_y + lh_row - 5, elided_val)
+                # Command + description combined
                 painter.setPen(AMBER_DARK)
-                painter.drawText(col3, cur_y + lh_row - 5, cmd)
-                painter.setPen(AMBER_VERY_DIM)
-                elided_desc = QFontMetrics(mono).elidedText(
-                    desc, Qt.TextElideMode.ElideRight, w - col4 - 20)
-                painter.drawText(col4, cur_y + lh_row - 5, elided_desc)
+                full_cmd = f"{cmd}   — {desc}"
+                elided_cmd = QFontMetrics(mono).elidedText(
+                    full_cmd, Qt.TextElideMode.ElideRight, w - col3 - 20)
+                painter.drawText(col3, cur_y + lh_row - 5, elided_cmd)
                 cur_y += lh_row
 
             cur_y += 8
@@ -3506,13 +3507,23 @@ class MainWindow(QMainWindow):
             if k == Qt.Key.Key_L:
                 self.show_library(); return
             if k == Qt.Key.Key_O:
-                self.reader._cycle_swatch(-1); return
+                self.reader._cycle_swatch(-1)
+                self.update()
+                if self.library.isVisible(): self.library.update()
+                return
             if k == Qt.Key.Key_P:
-                self.reader._cycle_swatch(1); return
+                self.reader._cycle_swatch(1)
+                self.update()
+                if self.library.isVisible(): self.library.update()
+                return
             if k == Qt.Key.Key_Comma:
-                self.reader._cycle_font(-1); return
+                self.reader._cycle_font(-1)
+                self.update()
+                return
             if k == Qt.Key.Key_Period:
-                self.reader._cycle_font(1); return
+                self.reader._cycle_font(1)
+                self.update()
+                return
 
         super().keyPressEvent(ev)
 
