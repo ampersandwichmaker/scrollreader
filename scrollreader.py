@@ -1337,7 +1337,7 @@ class ReaderWidget(QWidget):
             else:
                 ref = ("SPC/↓ NEXT   ↑/TAB BACK   CTRL+ENTER CMD   "
                        "CTRL+L LIB   CTRL+N/B/H PANELS   "
-                       "CTRL+I SWATCH   CTRL+O/P HUE   CTRL+U TINT   "
+                       "CTRL+I SWATCH   CTRL+O/P HUE   "
                        "CTRL+,/. FONT   SN/SP/SF/SL SEARCH   CC REPEAT")
             painter.drawText(6, h - 8, ref)
 
@@ -1994,15 +1994,15 @@ class ReaderWidget(QWidget):
                 self.config.set("ui_font_offset", str(_UI_FONT_OFFSET_ref[0]))
                 self._update_cmd_style(); self.update(); return
             if k == Qt.Key.Key_Comma:
-                self._cycle_font(-1); return
+                pass; return   # handled by MainWindow
             if k == Qt.Key.Key_Period:
-                self._cycle_font(1); return
+                pass; return   # handled by MainWindow
             if k == Qt.Key.Key_O:
-                self._cycle_hue(-0.02); return
+                pass; return   # handled by MainWindow
             if k == Qt.Key.Key_P:
-                self._cycle_hue(0.02); return
+                pass; return   # handled by MainWindow
             if k == Qt.Key.Key_I:
-                self._cycle_swatch(); return
+                pass; return   # handled by MainWindow
 
             return  # eat unhandled Ctrl combos
 
@@ -2657,7 +2657,6 @@ class LibraryWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet("background: transparent;")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-
         self._cmd_mode    = False
         self._cmd_cooldown = 0.0
         self.cmd = QLineEdit(self)
@@ -2763,22 +2762,17 @@ class LibraryWidget(QWidget):
     def paintEvent(self, ev):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
         w, h = self.width(), self.height()
 
-        # Dimmed background (PDF showing through)
-        painter.fillRect(0, 0, w, h, QColor(0, 0, 0, 185))
-
-        # Main panel background
-        panel_y = 0
-        painter.fillRect(0, panel_y, w, h, QColor(0,0,0,240))
+        # Solid background — no PDF showing through
+        painter.fillRect(0, 0, w, h, UI_BG)
 
         # Tabs
         self._tab_rects = []
         self._paint_tabs(painter, w)
 
         # Content area
-        content_y = panel_y + TAB_H * 2 + 4
+        content_y = TAB_H * 2 + 4
         content_h = h - content_y - TAG_BAR_H - LIB_STATUS_H - (26 if self._cmd_mode else 0)
 
         if self.tab == "SETTINGS":
@@ -3150,10 +3144,11 @@ class LibraryWidget(QWidget):
 
         cur_y   = y + 12
         lh_head = 26
-        lh_row  = 20
-        col2    = 200
-        col3    = 420
-        col4    = 640
+        lh_row  = 22
+        col1    = x + 16        # key name
+        col2    = x + 220       # current value
+        col3    = x + 420       # set command
+        col4    = x + 700       # description
 
         painter.setClipRect(QRect(x, y, w, h))
         for section, rows in settings_ref:
@@ -3163,28 +3158,26 @@ class LibraryWidget(QWidget):
             painter.fillRect(QRect(x, cur_y, w, lh_head), QColor(10,8,0))
             painter.setPen(AMBER_BRIGHT)
             painter.setFont(head)
-            painter.drawText(x + 16, cur_y + lh_head - 6, section)
+            painter.drawText(col1, cur_y + lh_head - 6, section)
             cur_y += lh_head + 2
 
             painter.setFont(mono)
             for key, val, cmd, desc in rows:
                 if cur_y + lh_row > y + h: break
-                # Key
                 painter.setPen(AMBER)
                 painter.setFont(mono_b)
-                painter.drawText(x + 16, cur_y + lh_row - 5, key)
-                # Value
+                painter.drawText(col1, cur_y + lh_row - 5, key)
                 painter.setPen(AMBER_DIM)
                 painter.setFont(mono)
                 elided_val = QFontMetrics(mono).elidedText(
                     str(val), Qt.TextElideMode.ElideRight, col3 - col2 - 10)
-                painter.drawText(x + col2, cur_y + lh_row - 5, elided_val)
-                # Command
-                painter.setPen(AMBER_DIM)
-                painter.drawText(x + col3, cur_y + lh_row - 5, cmd)
-                # Description
+                painter.drawText(col2, cur_y + lh_row - 5, elided_val)
+                painter.setPen(AMBER_DARK)
+                painter.drawText(col3, cur_y + lh_row - 5, cmd)
                 painter.setPen(AMBER_VERY_DIM)
-                painter.drawText(x + col4, cur_y + lh_row - 5, desc)
+                elided_desc = QFontMetrics(mono).elidedText(
+                    desc, Qt.TextElideMode.ElideRight, w - col4 - 20)
+                painter.drawText(col4, cur_y + lh_row - 5, elided_desc)
                 cur_y += lh_row
 
             cur_y += 8
@@ -3533,13 +3526,30 @@ class MainWindow(QMainWindow):
             self.reader.update()
 
     def keyPressEvent(self, ev: QKeyEvent):
-        if ev.key() == Qt.Key.Key_F11:
-            if self.isFullScreen():
-                self.showMaximized()
-            else:
-                self.showFullScreen()
-        else:
-            super().keyPressEvent(ev)
+        k    = ev.key()
+        ctrl = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
+
+        # Global shortcuts — work from any screen
+        if k == Qt.Key.Key_F11:
+            if self.isFullScreen(): self.showMaximized()
+            else:                   self.showFullScreen()
+            return
+
+        if ctrl:
+            if k == Qt.Key.Key_L:
+                self.show_library(); return
+            if k == Qt.Key.Key_I:
+                self.reader._cycle_swatch(); return
+            if k == Qt.Key.Key_O:
+                self.reader._cycle_hue(-0.02); return
+            if k == Qt.Key.Key_P:
+                self.reader._cycle_hue(0.02); return
+            if k == Qt.Key.Key_Comma:
+                self.reader._cycle_font(-1); return
+            if k == Qt.Key.Key_Period:
+                self.reader._cycle_font(1); return
+
+        super().keyPressEvent(ev)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
