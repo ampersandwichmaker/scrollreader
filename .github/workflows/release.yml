@@ -23,9 +23,6 @@ jobs:
       - name: Generate icon
         run: python tools/generate_icon.py
 
-      - name: Generate icon
-        run: python tools/generate_icon.py
-
       - name: Build exe with PyInstaller
         run: |
           if (!(Test-Path fonts)) { New-Item -ItemType Directory -Path fonts }
