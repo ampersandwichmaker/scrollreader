@@ -145,6 +145,134 @@ try:
 except ImportError:
     HAS_PRINT = False
 
+import colorsys
+
+# ---------------------------------------------------------------------------
+# Colour swatches
+# ---------------------------------------------------------------------------
+
+SWATCHES = {
+    "amber":      {"bg": "#000000", "primary": "#ffbb33", "bright": "#ffb000",
+                   "dim": "#996600", "dark": "#553300", "very_dim": "#332200",
+                   "inv_bg": "#ffbb33", "inv_fg": "#000000"},
+    "phosphor":   {"bg": "#000000", "primary": "#33ff66", "bright": "#66ff99",
+                   "dim": "#1a8c3a", "dark": "#0d4d20", "very_dim": "#061a0a",
+                   "inv_bg": "#33ff66", "inv_fg": "#000000"},
+    "cyan":       {"bg": "#000000", "primary": "#00ffcc", "bright": "#66ffee",
+                   "dim": "#008866", "dark": "#004433", "very_dim": "#001a11",
+                   "inv_bg": "#00ffcc", "inv_fg": "#000000"},
+    "blood":      {"bg": "#0a0000", "primary": "#ff3333", "bright": "#ff6666",
+                   "dim": "#991111", "dark": "#550000", "very_dim": "#220000",
+                   "inv_bg": "#ff3333", "inv_fg": "#000000"},
+    "ice":        {"bg": "#000811", "primary": "#aaddff", "bright": "#ddeeff",
+                   "dim": "#336699", "dark": "#1a3355", "very_dim": "#0a1a2a",
+                   "inv_bg": "#aaddff", "inv_fg": "#000811"},
+    "paper":      {"bg": "#f5e6c8", "primary": "#3d2800", "bright": "#1a0f00",
+                   "dim": "#7a5500", "dark": "#b8a070", "very_dim": "#ddd0b0",
+                   "inv_bg": "#3d2800", "inv_fg": "#f5e6c8"},
+    "slate":      {"bg": "#0a0f14", "primary": "#c8d8e8", "bright": "#eef4fa",
+                   "dim": "#5a7a99", "dark": "#2a3d55", "very_dim": "#141f2a",
+                   "inv_bg": "#c8d8e8", "inv_fg": "#0a0f14"},
+    "gold":       {"bg": "#0a0800", "primary": "#ffd700", "bright": "#ffec66",
+                   "dim": "#997f00", "dark": "#554500", "very_dim": "#221c00",
+                   "inv_bg": "#ffd700", "inv_fg": "#000000"},
+    "marathon":   {"bg": "#2233cc", "primary": "#ffffff", "bright": "#ffffff",
+                   "dim": "#aabbff", "dark": "#6677dd", "very_dim": "#3344aa",
+                   "inv_bg": "#ffffff", "inv_fg": "#2233cc"},
+    "neon":       {"bg": "#ccff00", "primary": "#111111", "bright": "#000000",
+                   "dim": "#445500", "dark": "#aabb00", "very_dim": "#bbdd00",
+                   "inv_bg": "#111111", "inv_fg": "#ccff00"},
+    "mono_dark":  {"bg": "#000000", "primary": "#ffffff", "bright": "#ffffff",
+                   "dim": "#888888", "dark": "#444444", "very_dim": "#222222",
+                   "inv_bg": "#ffffff", "inv_fg": "#000000"},
+    "mono_light": {"bg": "#ffffff", "primary": "#000000", "bright": "#000000",
+                   "dim": "#555555", "dark": "#aaaaaa", "very_dim": "#dddddd",
+                   "inv_bg": "#000000", "inv_fg": "#ffffff"},
+    "ember":      {"bg": "#ffffff", "primary": "#cc7700", "bright": "#995500",
+                   "dim": "#ddaa66", "dark": "#eeccaa", "very_dim": "#f5e8d8",
+                   "inv_bg": "#cc7700", "inv_fg": "#ffffff"},
+    "rose":       {"bg": "#fff0f5", "primary": "#cc2266", "bright": "#990044",
+                   "dim": "#dd88aa", "dark": "#eebbd0", "very_dim": "#f8dde8",
+                   "inv_bg": "#cc2266", "inv_fg": "#ffffff"},
+}
+SWATCH_NAMES = list(SWATCHES.keys())
+_current_swatch_ref = [0]   # index into SWATCH_NAMES
+_pdf_tint_ref       = [False]
+
+
+def _apply_swatch(name: str, config):
+    """Apply a named swatch to config and globals."""
+    s = SWATCHES.get(name, SWATCHES["amber"])
+    config.data["theme_primary"]  = s["primary"]
+    config.data["theme_bright"]   = s["bright"]
+    config.data["theme_dim"]      = s["dim"]
+    config.data["theme_dark"]     = s["dark"]
+    config.data["theme_very_dim"] = s["very_dim"]
+    config.data["theme_inv_bg"]   = s["inv_bg"]
+    config.data["theme_inv_fg"]   = s["inv_fg"]
+    config.data["theme_bg"]       = s["bg"]
+    config.data["current_swatch"] = name
+    config.save()
+    _apply_theme(config)
+
+
+def _apply_hue(hue: float, config):
+    """Derive a full theme from a single hue (0.0–1.0) via colorsys."""
+    def _hc(h, s, v): return QColor.fromHsvF(h % 1.0, s, v).name()
+    config.data["theme_primary"]  = _hc(hue, 0.8, 1.0)
+    config.data["theme_bright"]   = _hc(hue, 0.6, 1.0)
+    config.data["theme_dim"]      = _hc(hue, 0.8, 0.6)
+    config.data["theme_dark"]     = _hc(hue, 0.8, 0.35)
+    config.data["theme_very_dim"] = _hc(hue, 0.8, 0.15)
+    config.data["theme_inv_bg"]   = _hc(hue, 0.8, 1.0)
+    config.data["theme_inv_fg"]   = "#000000"
+    config.data["theme_bg"]       = "#000000"
+    config.data["hue_override"]   = hue
+    config.save()
+    _apply_theme(config)
+
+
+def _scan_fonts() -> list:
+    """Return list of TTF paths in the fonts/ directory."""
+    fonts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+    if not os.path.exists(fonts_dir):
+        return []
+    return sorted([os.path.join(fonts_dir, f)
+                   for f in os.listdir(fonts_dir)
+                   if f.lower().endswith(('.ttf', '.otf'))])
+
+
+def _load_font_by_path(path: str) -> str:
+    """Load a font file and return its family name."""
+    fid = QFontDatabase.addApplicationFont(path)
+    if fid >= 0:
+        families = QFontDatabase.applicationFontFamilies(fid)
+        if families:
+            return families[0]
+    return _UI_FONT_FAMILY
+
+
+def _tint_pixmap(pm: QPixmap, bg_color: QColor, tint_strength: float = 0.25) -> QPixmap:
+    """Apply a gentle tint to a pixmap to match the theme bg."""
+    if not _pdf_tint_ref[0]:
+        return pm
+    img    = pm.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    w, h   = img.width(), img.height()
+    tr, tg, tb = bg_color.red(), bg_color.green(), bg_color.blue()
+    # Simple per-pixel blend — fast enough for reasonable page sizes
+    for y in range(h):
+        for x in range(w):
+            c  = img.pixel(x, y)
+            r  = (c >> 16) & 0xff
+            g  = (c >>  8) & 0xff
+            b  = (c      ) & 0xff
+            a  = (c >> 24) & 0xff
+            nr = int(r + (tr - r) * tint_strength)
+            ng = int(g + (tg - g) * tint_strength)
+            nb = int(b + (tb - b) * tint_strength)
+            img.setPixel(x, y, (a<<24)|(nr<<16)|(ng<<8)|nb)
+    return QPixmap.fromImage(img)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -190,9 +318,13 @@ DEFAULT_CONFIG = {
     "theme_inv_bg":          "#ffbb33",
     "theme_inv_fg":          "#000000",
     "theme_bg":              "#000000",
-    "margin_side":           "right",    # "left" or "right"
-    "ui_border_width":       2,          # thickness of UI borders/lines
-    "ui_font_offset":        0,          # added to all UI font sizes
+    "margin_side":           "right",
+    "ui_border_width":       2,
+    "ui_font_offset":        0,
+    "current_swatch":        "amber",
+    "hue_override":          None,
+    "pdf_tint":              False,
+    "current_font_idx":      0,
     "eager_pages":           2,             # pages rendered synchronously each side of current
 }
 
@@ -684,9 +816,13 @@ class PDFDocument:
         return pm
 
     def get_pixmap(self, pn: int) -> QPixmap:
-        """Return rendered pixmap or placeholder."""
+        """Return rendered pixmap or placeholder, with optional tint."""
         pm = self.page_pixmaps[pn]
-        return pm if pm is not None else self.placeholder(pn)
+        if pm is None:
+            pm = self.placeholder(pn)
+        if _pdf_tint_ref[0]:
+            pm = _tint_pixmap(pm, UI_BG, 0.3)
+        return pm
 
     @property
     def page_count(self):
@@ -765,20 +901,12 @@ class ReaderWidget(QWidget):
         self.setMinimumSize(600, 400)
         self.setMouseTracking(False)
 
-        self._cmd_cooldown = 0.0   # timestamp after which Enter re-opens cmd bar
+        self._cmd_cooldown = 0.0
 
         self.cmd = QLineEdit(self)
         self.cmd.setVisible(False)
         self.cmd.installEventFilter(self)
-        self.cmd.setStyleSheet("""
-            QLineEdit {
-                background-color: #000000; color: #ffbb33;
-                border: none; border-top: 1px solid #553300;
-                padding: 3px 10px;
-                font-family: "IBM VGA 8x16", "Courier New", monospace; font-size: 13px;
-                selection-background-color: #ffbb33; selection-color: #000000;
-            }
-        """)
+        self._update_cmd_style()
 
     def eventFilter(self, obj, event):
         from PyQt6.QtCore import QEvent
@@ -809,9 +937,48 @@ class ReaderWidget(QWidget):
                 return True
         return super().eventFilter(obj, event)
 
+    def _update_cmd_style(self):
+        """Update command bar style to match current theme and font size."""
+        sz  = max(6, 10 + _UI_FONT_OFFSET_ref[0])
+        fam = _UI_FONT_FAMILY
+        inv_bg = AMBER_INV_BG.name()
+        inv_fg = AMBER_INV_FG.name()
+        self.cmd.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {inv_bg};
+                color: {inv_fg};
+                border: none;
+                padding: 3px 10px;
+                font-family: "{fam}", "Courier New", monospace;
+                font-size: {sz}px;
+                selection-background-color: {inv_fg};
+                selection-color: {inv_bg};
+            }}
+        """)
+
     def resizeEvent(self, ev):
         self.cmd.setGeometry(0, self.height()-BOTTOM_BAR_H, self.width(), BOTTOM_BAR_H)
         super().resizeEvent(ev)
+
+    def _enter_command_mode(self):
+        if time.time() < self._cmd_cooldown:
+            return
+        self._cmd_history_idx = -1
+        self._update_cmd_style()
+        self.command_mode = True
+        self.cmd.setVisible(True)
+        self.cmd.setText(":")
+        self.cmd.setFocus()
+        self.cmd.setCursorPosition(len(self.cmd.text()))
+        self.update()   # repaint bottom bar as amber inverse
+
+    def _exit_command_mode(self):
+        self.command_mode = False
+        self._cmd_cooldown = time.time() + 0.15
+        self.cmd.setVisible(False)
+        self.cmd.clear()
+        self.setFocus()
+        self.update()
 
     def _cfg(self, key):
         if self.document:
@@ -1177,30 +1344,27 @@ class ReaderWidget(QWidget):
         y    = h - BOTTOM_BAR_H
 
         if self.command_mode:
-            # Full amber inverse — command bar
+            # Amber inverse background — cmd QLineEdit widget paints on top
             painter.fillRect(QRect(0, y, w, BOTTOM_BAR_H), AMBER_INV_BG)
-            painter.setPen(AMBER_INV_FG)
-            painter.setFont(_ui_font(9, bold=True))
-            # cmd widget is positioned here, just draw the colon hint
-            painter.drawText(6, h - 8, ":")
         else:
             painter.fillRect(QRect(0, y, w, BOTTOM_BAR_H), UI_BG)
-            painter.setPen(AMBER_DARK)
-            painter.setPen(_mk_pen(AMBER_DARK, self._bw())); painter.drawLine(0, y, w, y)
+            painter.setPen(_mk_pen(AMBER_DARK, self._bw()))
+            painter.drawLine(0, y, w, y)
             painter.setPen(AMBER_DIM)
             painter.setFont(_ui_font(8))
 
             if self._panel_mode:
-                ref = "↑↓ NAVIGATE   SPACE SELECT   TAB/ESC BACK"
+                ref = "↑↓ NAVIGATE   SPACE/ENTER SELECT   TAB/ESC BACK"
             elif self._pending:
-                ref = "Y CONFIRM   N/ESC CANCEL"
+                ref = "Y CONFIRM   N/TAB/ESC CANCEL"
             elif self.status_text:
                 ref = self.status_text
             else:
-                ref = ("SPACE/↓ NEXT   ↑/TAB BACK   [ ] HL±1   0 UNDO"
-                       "   SB BKMK   SN NOTES   SH HL   LIB LIBRARY"
-                       "   SN/SP/SF/SL SEARCH   CC REPEAT")
-            painter.drawText(L_MARGIN + 4, h - 8, ref)
+                ref = ("SPC/↓ NEXT   ↑/TAB BACK   CTRL+ENTER CMD   "
+                       "CTRL+L LIB   CTRL+N/B/H PANELS   "
+                       "CTRL+I SWATCH   CTRL+O/P HUE   CTRL+U TINT   "
+                       "CTRL+,/. FONT   SN/SP/SF/SL SEARCH   CC REPEAT")
+            painter.drawText(6, h - 8, ref)
 
     # ── Margin indicators ─────────────────────────────────────────────────
 
@@ -1771,35 +1935,36 @@ class ReaderWidget(QWidget):
     # --------------------------------------------------------------- input
 
     def keyPressEvent(self, ev: QKeyEvent):
-        k = ev.key()
+        k    = ev.key()
+        ctrl = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
 
-        # Confirmation overlay
+        # ── Confirmation overlay ──────────────────────────────────────────
         if self._pending:
             if k == Qt.Key.Key_Y:
                 result = self._pending["action"]()
-                self._pending = None
-                self.update()
+                self._pending = None; self.update()
             elif k in (Qt.Key.Key_N, Qt.Key.Key_Escape, Qt.Key.Key_Tab):
-                self._pending = None
-                self.update()
+                self._pending = None; self.update()
             return
 
-        # Annotation panel navigation
+        # ── Annotation panel navigation ───────────────────────────────────
         if self._panel_mode:
             if k in (Qt.Key.Key_Tab, Qt.Key.Key_Escape):
                 self._panel_back()
-            elif k == Qt.Key.Key_Space:
+            elif k in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self._panel_select()
-            elif k in (Qt.Key.Key_Down, Qt.Key.Key_Right):
+            elif k in (Qt.Key.Key_Down, Qt.Key.Key_Right,
+                       Qt.Key.Key_S, Qt.Key.Key_D):
                 self._panel_navigate(1)
-            elif k in (Qt.Key.Key_Up, Qt.Key.Key_Left):
+            elif k in (Qt.Key.Key_Up, Qt.Key.Key_Left,
+                       Qt.Key.Key_W, Qt.Key.Key_A):
                 self._panel_navigate(-1)
-            elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if ctrl and k == Qt.Key.Key_Return:
                 if time.time() > self._cmd_cooldown:
                     self._enter_command_mode()
             return
 
-        # Help/overlay panel
+        # ── Help/overlay panel ────────────────────────────────────────────
         if self.panel:
             if k in (Qt.Key.Key_Escape, Qt.Key.Key_Tab):
                 self.panel = None; self._panel_scroll = 0; self.update()
@@ -1817,37 +1982,65 @@ class ReaderWidget(QWidget):
             if k == Qt.Key.Key_Escape: self._exit_command_mode()
             return
 
-        if   k in (Qt.Key.Key_Return, Qt.Key.Key_Enter): self._enter_command_mode()
-        elif k in (Qt.Key.Key_Space, Qt.Key.Key_Down):   self._step(1)
+        # ── Ctrl shortcuts ────────────────────────────────────────────────
+        if ctrl:
+            if k in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._enter_command_mode(); return
+            if k == Qt.Key.Key_L:
+                self.window().show_library(); return
+            if k == Qt.Key.Key_N:
+                self._open_annot_panel("notes"); return
+            if k == Qt.Key.Key_B:
+                self._open_annot_panel("bookmarks"); return
+            if k == Qt.Key.Key_H:
+                self._open_annot_panel("highlights"); return
+            if k == Qt.Key.Key_BracketLeft:
+                cur = int(self._cfg("highlight_height") or 20)
+                self.config.set("highlight_height", str(max(4, cur - 2)))
+                self.update(); return
+            if k == Qt.Key.Key_BracketRight:
+                cur = int(self._cfg("highlight_height") or 20)
+                self.config.set("highlight_height", str(cur + 2))
+                self.update(); return
+            if k == Qt.Key.Key_Equal:
+                cur = int(self.config.get("ui_border_width") or 2)
+                self.config.set("ui_border_width", str(cur + 1))
+                self.update(); return
+            if k == Qt.Key.Key_Minus:
+                cur = int(self.config.get("ui_border_width") or 2)
+                self.config.set("ui_border_width", str(max(1, cur - 1)))
+                self.update(); return
+            if k == Qt.Key.Key_Semicolon:
+                _UI_FONT_OFFSET_ref[0] += 1
+                self.config.set("ui_font_offset", str(_UI_FONT_OFFSET_ref[0]))
+                self._update_cmd_style(); self.update(); return
+            if k == Qt.Key.Key_Apostrophe:
+                _UI_FONT_OFFSET_ref[0] = max(-6, _UI_FONT_OFFSET_ref[0] - 1)
+                self.config.set("ui_font_offset", str(_UI_FONT_OFFSET_ref[0]))
+                self._update_cmd_style(); self.update(); return
+            if k == Qt.Key.Key_Comma:
+                self._cycle_font(-1); return
+            if k == Qt.Key.Key_Period:
+                self._cycle_font(1); return
+            if k == Qt.Key.Key_O:
+                self._cycle_hue(-0.02); return
+            if k == Qt.Key.Key_P:
+                self._cycle_hue(0.02); return
+            if k == Qt.Key.Key_I:
+                self._cycle_swatch(); return
+            if k == Qt.Key.Key_U:
+                _pdf_tint_ref[0] = not _pdf_tint_ref[0]
+                self.config.set("pdf_tint", _pdf_tint_ref[0])
+                self.update(); return
+            return  # eat unhandled Ctrl combos
+
+        # ── Normal reading keys ───────────────────────────────────────────
+        if k in (Qt.Key.Key_Space, Qt.Key.Key_Return,
+                 Qt.Key.Key_Enter, Qt.Key.Key_Down):  self._step(1)
         elif k in (Qt.Key.Key_Up, Qt.Key.Key_Backspace, Qt.Key.Key_Tab): self._step(-1)
         elif k == Qt.Key.Key_PageDown: self._step(self._lines_per_screen())
         elif k == Qt.Key.Key_PageUp:   self._step(-self._lines_per_screen())
-        elif k == Qt.Key.Key_BracketLeft:
-            cur = int(self._cfg("highlight_height") or 20)
-            self.config.set("highlight_height", str(max(4, cur-1)))
-            self.update()
-        elif k == Qt.Key.Key_BracketRight:
-            cur = int(self._cfg("highlight_height") or 20)
-            self.config.set("highlight_height", str(cur+1))
-            self.update()
-        elif k == Qt.Key.Key_Equal:
-            cur = int(self.config.get("ui_border_width") or 2)
-            self.config.set("ui_border_width", str(cur+1))
-            self.update()
-        elif k == Qt.Key.Key_Minus:
-            cur = int(self.config.get("ui_border_width") or 2)
-            self.config.set("ui_border_width", str(max(1, cur-1)))
-            self.update()
-        elif k == Qt.Key.Key_Semicolon:
-            _UI_FONT_OFFSET_ref[0] += 1
-            self.config.set("ui_font_offset", str(_UI_FONT_OFFSET_ref[0]))
-            self.update()
-        elif k == Qt.Key.Key_Apostrophe:
-            _UI_FONT_OFFSET_ref[0] = max(-6, _UI_FONT_OFFSET_ref[0] - 1)
-            self.config.set("ui_font_offset", str(_UI_FONT_OFFSET_ref[0]))
-            self.update()
         elif k == Qt.Key.Key_0:
-            # Undo last line movement
             prev = self._pop_history()
             if prev is not None and self.document:
                 self.current_line = max(0, min(len(self.document.lines)-1, prev))
@@ -1897,23 +2090,6 @@ class ReaderWidget(QWidget):
 
     # ------------------------------------------------------- command mode
 
-    def _enter_command_mode(self):
-        if time.time() < self._cmd_cooldown:
-            return
-        self._cmd_history_idx = -1   # reset browsing position
-        self.command_mode = True
-        self.cmd.setVisible(True)
-        self.cmd.setText(":")
-        self.cmd.setFocus()
-        self.cmd.setCursorPosition(len(self.cmd.text()))
-
-    def _exit_command_mode(self):
-        self.command_mode = False
-        self._cmd_cooldown = time.time() + 0.15
-        self.cmd.setVisible(False)
-        self.cmd.clear()
-        self.setFocus(); self.update()
-
     def _execute_command(self):
         raw = self.cmd.text().lstrip(":").strip()
         self._exit_command_mode()
@@ -1928,6 +2104,39 @@ class ReaderWidget(QWidget):
             self.status_text = result
             self.update()
             QTimer.singleShot(3000, lambda: self._clear_status())
+
+    def _cycle_font(self, direction: int):
+        """Cycle through fonts in the fonts/ directory."""
+        global _UI_FONT_FAMILY
+        fonts = _scan_fonts()
+        if not fonts: return
+        idx = int(self.config.get("current_font_idx") or 0)
+        idx = (idx + direction) % len(fonts)
+        fam = _load_font_by_path(fonts[idx])
+        _UI_FONT_FAMILY = fam
+        self.config.set("current_font_idx", str(idx))
+        self._update_cmd_style()
+        self.status_text = f"font: {os.path.basename(fonts[idx])}"
+        QTimer.singleShot(2000, self._clear_status)
+        self.update()
+
+    def _cycle_hue(self, delta: float):
+        """Step the hue wheel by delta (0.0–1.0)."""
+        cur = float(self.config.get("hue_override") or 0.1)
+        _apply_hue((cur + delta) % 1.0, self.config)
+        self._update_cmd_style()
+        self.update()
+
+    def _cycle_swatch(self):
+        """Cycle through handmade swatches."""
+        idx  = (SWATCH_NAMES.index(self.config.get("current_swatch") or "amber") + 1) % len(SWATCH_NAMES)
+        name = SWATCH_NAMES[idx]
+        _apply_swatch(name, self.config)
+        _current_swatch_ref[0] = idx
+        self._update_cmd_style()
+        self.status_text = f"swatch: {name}"
+        QTimer.singleShot(2000, self._clear_status)
+        self.update()
 
     def _clear_status(self):
         self.status_text = ""
@@ -1992,9 +2201,6 @@ class ReaderWidget(QWidget):
         if cmd == "zoom":
             if len(parts) < 2: return f"zoom: {self.zoom_mode}  options: {', '.join(ZOOM_MODES+['cycle'])}"
             return self._do_zoom(parts[1].strip())
-        if cmd in ("sn","shownotes"):        return self._open_annot_panel("notes")
-        if cmd in ("sb","showbookmarks"):    return self._open_annot_panel("bookmarks")
-        if cmd in ("sh","showhighlights"):   return self._open_annot_panel("highlights")
         if cmd in ("vn","viewnotes"):        return self._open_annot_panel("notes")
         if cmd in ("vb","viewbookmarks"):    return self._open_annot_panel("bookmarks")
         if cmd in ("vh","viewhighlights"):   return self._open_annot_panel("highlights")
@@ -2997,31 +3203,33 @@ class LibraryWidget(QWidget):
         painter.setClipping(False)
 
     def _paint_tag_bar(self, painter: QPainter, x: int, y: int, w: int):
-        self._tag_rects = []
+        """Bottom info bar: shows METAR + full filename of cursor book."""
         painter.fillRect(QRect(x, y, w, TAG_BAR_H), UI_BG)
-        painter.setPen(AMBER_VERY_DIM)
+        painter.setPen(AMBER_DARK)
         painter.drawLine(x, y, x + w, y)
 
-        tags   = self._all_tags()
-        mono_b = _ui_font(9, bold=True)
-        painter.setFont(mono_b)
-        cx = x + 10
-        ty = y + TAG_BAR_H // 2 + 5
+        # Find cursor book
+        txt = ""
+        if self._book_rects and self._cursor_idx < len(self._book_rects):
+            _, fp = self._book_rects[self._cursor_idx]
+            if fp is not None:
+                e  = self.history._entry(fp)
+                tp = e.get("total_pages") or 1
+                ln = e.get("line") or 0
+                tl = max((e.get("total_lines") or 1), 1)
+                n  = len(e.get("notes", []))
+                b  = len(e.get("bookmarks", []))
+                h  = len(e.get("highlights", []))
+                r  = int(ln / tl * 100)
+                metar = f"N{n}B{b}H{h}R{r}P{tp}"
+                fname = os.path.basename(fp)
+                txt   = f"{metar}   {fname}"
+            elif fp is None:
+                txt = f"+{len([b for b in self._current_books()])} overflow books"
 
-        # "ALL" pill
-        all_active = self.active_tag is None
-        self._draw_tag_pill(painter, cx, y + 4, "ALL", all_active, "#336655")
-        all_w = QFontMetrics(mono_b).horizontalAdvance("ALL") + 20
-        self._tag_rects.append((QRect(cx, y + 4, all_w, TAG_BAR_H - 8), None))
-        cx += all_w + 8
-
-        for tag in tags:
-            active = tag == self.active_tag
-            pill_w = QFontMetrics(mono_b).horizontalAdvance(tag) + 20
-            if cx + pill_w > w - 10: break
-            self._draw_tag_pill(painter, cx, y + 4, tag, active, "#334466")
-            self._tag_rects.append((QRect(cx, y + 4, pill_w, TAG_BAR_H - 8), tag))
-            cx += pill_w + 8
+        painter.setPen(AMBER_DIM)
+        painter.setFont(_ui_font(9))
+        painter.drawText(x + 10, y + TAG_BAR_H - 8, txt or "—")
 
     def _draw_tag_pill(self, painter, x, y, text, active, color_hex):
         mono_b = _ui_font(9, bold=True)
@@ -3147,7 +3355,8 @@ class LibraryWidget(QWidget):
         self._refresh_books()
         self.update()
     def keyPressEvent(self, ev: QKeyEvent):
-        k = ev.key()
+        k    = ev.key()
+        ctrl = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
 
         if self._cmd_mode:
             if k == Qt.Key.Key_Escape:
@@ -3157,26 +3366,25 @@ class LibraryWidget(QWidget):
         if k == Qt.Key.Key_Escape:
             self._go_back(); return
 
-        if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
             if time.time() > self._cmd_cooldown:
-                self._enter_command_mode()
+                if ctrl:
+                    self._enter_command_mode()
+                else:
+                    self._select_current()
             return
 
-        if k == Qt.Key.Key_Space:
-            self._select_current(); return
         if k in (Qt.Key.Key_Tab, Qt.Key.Key_Backspace):
             self._go_back(); return
-        # Left/right cycle tabs
-        if k == Qt.Key.Key_Left:
+        if k in (Qt.Key.Key_Left, Qt.Key.Key_A):
             self._cycle_tab(-1); return
-        if k == Qt.Key.Key_Right:
+        if k in (Qt.Key.Key_Right, Qt.Key.Key_D):
             self._cycle_tab(1); return
-        # Up/down move block cursor
-        if k == Qt.Key.Key_Down:
+        if k in (Qt.Key.Key_Down, Qt.Key.Key_S):
             n = len(self._book_rects)
             if n: self._cursor_idx = min(n-1, self._cursor_idx+1)
             self.update(); return
-        if k == Qt.Key.Key_Up:
+        if k in (Qt.Key.Key_Up, Qt.Key.Key_W):
             if self._book_rects: self._cursor_idx = max(0, self._cursor_idx-1)
             self.update(); return
 
@@ -3347,8 +3555,22 @@ def main():
     app.setApplicationName("ScrollReader")
     _load_vga_font()
     config  = Config()
+    # Apply saved swatch or hue
+    hue = config.get("hue_override")
+    if hue is not None:
+        _apply_hue(float(hue), config)
+    else:
+        swatch = config.get("current_swatch") or "amber"
+        _apply_swatch(swatch, config)
     _apply_theme(config)
     _UI_FONT_OFFSET_ref[0] = int(config.get("ui_font_offset") or 0)
+    _pdf_tint_ref[0]       = bool(config.get("pdf_tint") or False)
+    # Load saved font
+    fonts = _scan_fonts()
+    fidx  = int(config.get("current_font_idx") or 0)
+    if fonts and fidx < len(fonts):
+        global _UI_FONT_FAMILY
+        _UI_FONT_FAMILY = _load_font_by_path(fonts[fidx]) or _UI_FONT_FAMILY
     history = History()
     initial = sys.argv[1] if len(sys.argv) > 1 and os.path.exists(sys.argv[1]) else None
     window  = MainWindow(config, history, initial_file=initial)
