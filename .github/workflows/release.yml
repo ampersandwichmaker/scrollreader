@@ -22,6 +22,7 @@ jobs:
 
       - name: Build exe with PyInstaller
         run: |
+          mkdir -p fonts
           pyinstaller --onefile --windowed --name ScrollReader --icon=assets/icon.ico --add-data "fonts;fonts" scrollreader.py
 
       - name: Upload Windows exe
@@ -56,6 +57,7 @@ jobs:
 
       - name: Build Linux binary
         run: |
+          mkdir -p fonts
           pyinstaller --onefile --name scrollreader --add-data "fonts:fonts" scrollreader.py
 
       - name: Make tarball
