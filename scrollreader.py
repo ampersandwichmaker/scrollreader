@@ -197,7 +197,6 @@ SWATCHES = {
 }
 SWATCH_NAMES = list(SWATCHES.keys())
 _current_swatch_ref = [0]   # index into SWATCH_NAMES
-_pdf_tint_ref       = [False]
 
 
 def _apply_swatch(name: str, config):
@@ -252,26 +251,7 @@ def _load_font_by_path(path: str) -> str:
     return _UI_FONT_FAMILY
 
 
-def _tint_pixmap(pm: QPixmap, bg_color: QColor, tint_strength: float = 0.25) -> QPixmap:
-    """Apply a gentle tint to a pixmap to match the theme bg."""
-    if not _pdf_tint_ref[0]:
-        return pm
-    img    = pm.toImage().convertToFormat(QImage.Format.Format_ARGB32)
-    w, h   = img.width(), img.height()
-    tr, tg, tb = bg_color.red(), bg_color.green(), bg_color.blue()
-    # Simple per-pixel blend — fast enough for reasonable page sizes
-    for y in range(h):
-        for x in range(w):
-            c  = img.pixel(x, y)
-            r  = (c >> 16) & 0xff
-            g  = (c >>  8) & 0xff
-            b  = (c      ) & 0xff
-            a  = (c >> 24) & 0xff
-            nr = int(r + (tr - r) * tint_strength)
-            ng = int(g + (tg - g) * tint_strength)
-            nb = int(b + (tb - b) * tint_strength)
-            img.setPixel(x, y, (a<<24)|(nr<<16)|(ng<<8)|nb)
-    return QPixmap.fromImage(img)
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -323,7 +303,6 @@ DEFAULT_CONFIG = {
     "ui_font_offset":        0,
     "current_swatch":        "amber",
     "hue_override":          None,
-    "pdf_tint":              False,
     "current_font_idx":      0,
     "eager_pages":           2,             # pages rendered synchronously each side of current
 }
@@ -816,13 +795,9 @@ class PDFDocument:
         return pm
 
     def get_pixmap(self, pn: int) -> QPixmap:
-        """Return rendered pixmap or placeholder, with optional tint."""
+        """Return rendered pixmap or placeholder."""
         pm = self.page_pixmaps[pn]
-        if pm is None:
-            pm = self.placeholder(pn)
-        if _pdf_tint_ref[0]:
-            pm = _tint_pixmap(pm, UI_BG, 0.3)
-        return pm
+        return pm if pm is not None else self.placeholder(pn)
 
     @property
     def page_count(self):
@@ -2028,13 +2003,22 @@ class ReaderWidget(QWidget):
                 self._cycle_hue(0.02); return
             if k == Qt.Key.Key_I:
                 self._cycle_swatch(); return
-            if k == Qt.Key.Key_U:
-                _pdf_tint_ref[0] = not _pdf_tint_ref[0]
-                self.config.set("pdf_tint", _pdf_tint_ref[0])
-                self.update(); return
+
             return  # eat unhandled Ctrl combos
 
+        # F11 fullscreen (no modifier needed)
+        if k == Qt.Key.Key_F11:
+            w = self.window()
+            if w.isFullScreen(): w.showMaximized()
+            else:                w.showFullScreen()
+            return
+
         # ── Normal reading keys ───────────────────────────────────────────
+        if k == Qt.Key.Key_F11:
+            w = self.window()
+            if w.isFullScreen(): w.showMaximized()
+            else: w.showFullScreen()
+            return
         if k in (Qt.Key.Key_Space, Qt.Key.Key_Return,
                  Qt.Key.Key_Enter, Qt.Key.Key_Down):  self._step(1)
         elif k in (Qt.Key.Key_Up, Qt.Key.Key_Backspace, Qt.Key.Key_Tab): self._step(-1)
@@ -2557,6 +2541,20 @@ def _adjust_sat(hex_color: str, factor: float) -> QColor:
     return c
 
 
+def _book_color(filepath: str, config) -> str:
+    """Derive a per-book color from the current theme primary hue + book hash."""
+    # Get hue from current theme primary
+    base = QColor(config.get("theme_primary") or "#ffbb33")
+    h, s, v, _ = base.getHsvF()
+    # Spread hue slightly per book using hash
+    slot   = hash(filepath) % 12
+    hshift = (slot - 6) / 60.0   # ±6 slots = ±0.1 hue shift
+    vh     = (h + hshift) % 1.0
+    # Vary value slightly too
+    vv = max(0.3, min(1.0, v - 0.05 + (slot % 4) * 0.05))
+    return QColor.fromHsvF(vh, s * 0.85, vv).name()
+
+
 def _scan_pdfs(directory: str, recursive: bool = False) -> list[str]:
     p = Path(directory)
     if not p.exists():
@@ -2715,15 +2713,6 @@ class LibraryWidget(QWidget):
         for fp, e in self.history.data.items():
             if not os.path.exists(fp):
                 continue
-            color = e.get("library_color")
-            if not color:
-                swatch = self.config.get("library_swatch") or DEFAULT_SWATCH
-                if isinstance(swatch, str):
-                    try: swatch = json.loads(swatch)
-                    except: swatch = DEFAULT_SWATCH
-                color = swatch[hash(fp) % len(swatch)]
-                e["library_color"] = color
-                self.history._save()
             books.append({
                 "filepath":  fp,
                 "title":     e.get("title") or Path(fp).stem,
@@ -2738,7 +2727,7 @@ class LibraryWidget(QWidget):
                 "notes":     len(e.get("notes", [])),
                 "bookmarks": len(e.get("bookmarks", [])),
                 "highlights":len(e.get("highlights", [])),
-                "color":     color,
+                "color":     _book_color(fp, self.config),
             })
         return books
 
@@ -3533,7 +3522,6 @@ class MainWindow(QMainWindow):
     def show_library(self):
         try:
             cw = self.centralWidget()
-            # Map central widget rect to MainWindow coordinates
             tl = cw.mapTo(self, cw.rect().topLeft())
             self.library.setGeometry(tl.x(), tl.y(), cw.width(), cw.height())
             self.library._refresh_books()
@@ -3543,6 +3531,15 @@ class MainWindow(QMainWindow):
         except Exception as ex:
             self.reader.status_text = f"library error: {ex}"
             self.reader.update()
+
+    def keyPressEvent(self, ev: QKeyEvent):
+        if ev.key() == Qt.Key.Key_F11:
+            if self.isFullScreen():
+                self.showMaximized()
+            else:
+                self.showFullScreen()
+        else:
+            super().keyPressEvent(ev)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
@@ -3564,7 +3561,6 @@ def main():
         _apply_swatch(swatch, config)
     _apply_theme(config)
     _UI_FONT_OFFSET_ref[0] = int(config.get("ui_font_offset") or 0)
-    _pdf_tint_ref[0]       = bool(config.get("pdf_tint") or False)
     # Load saved font
     fonts = _scan_fonts()
     fidx  = int(config.get("current_font_idx") or 0)
