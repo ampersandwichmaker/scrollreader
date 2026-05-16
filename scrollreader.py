@@ -96,6 +96,7 @@ def _load_vga_font() -> str:
     import os
     candidates = [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "Px437_IBM_VGA_8x16.ttf"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "Px437_IBM_VGA-8x16.ttf"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "Web437_IBM_VGA_8x16.ttf"),
     ]
     for path in candidates:
@@ -109,8 +110,11 @@ def _load_vga_font() -> str:
     return _UI_FONT_FAMILY
 
 
+_UI_FONT_OFFSET = 0   # adjusted by ; and ' keys
+
+
 def _ui_font(size: int = 10, bold: bool = False) -> QFont:
-    f = QFont(_UI_FONT_FAMILY, size)
+    f = QFont(_UI_FONT_FAMILY, max(6, size + _UI_FONT_OFFSET))
     if bold:
         f.setWeight(QFont.Weight.Bold)
     return f
@@ -188,6 +192,7 @@ DEFAULT_CONFIG = {
     "theme_bg":              "#000000",
     "margin_side":           "right",    # "left" or "right"
     "ui_border_width":       2,          # thickness of UI borders/lines
+    "ui_font_offset":        0,          # added to all UI font sizes
     "eager_pages":           2,             # pages rendered synchronously each side of current
 }
 
@@ -1833,6 +1838,16 @@ class ReaderWidget(QWidget):
             cur = int(self.config.get("ui_border_width") or 2)
             self.config.set("ui_border_width", str(max(1, cur-1)))
             self.update()
+        elif k == Qt.Key.Key_Semicolon:
+            global _UI_FONT_OFFSET
+            _UI_FONT_OFFSET += 1
+            self.config.set("ui_font_offset", str(_UI_FONT_OFFSET))
+            self.update()
+        elif k == Qt.Key.Key_Apostrophe:
+            global _UI_FONT_OFFSET
+            _UI_FONT_OFFSET = max(-6, _UI_FONT_OFFSET - 1)
+            self.config.set("ui_font_offset", str(_UI_FONT_OFFSET))
+            self.update()
         elif k == Qt.Key.Key_0:
             # Undo last line movement
             prev = self._pop_history()
@@ -2645,6 +2660,10 @@ class LibraryWidget(QWidget):
 
         def _unread(b):
             tp = max(b["total_pages"], 1)
+            if self.tab == "READ":
+                # Read books: size by total pages (all read, so remaining = 0)
+                return tp
+            # All other tabs: size by remaining (unread) pages
             return max(1, tp - round(b["line"] / max(b["total"], 1) * tp))
 
         unread      = [_unread(b) for b in books]
@@ -3331,6 +3350,8 @@ def main():
     _load_vga_font()
     config  = Config()
     _apply_theme(config)
+    global _UI_FONT_OFFSET
+    _UI_FONT_OFFSET = int(config.get("ui_font_offset") or 0)
     history = History()
     initial = sys.argv[1] if len(sys.argv) > 1 and os.path.exists(sys.argv[1]) else None
     window  = MainWindow(config, history, initial_file=initial)
