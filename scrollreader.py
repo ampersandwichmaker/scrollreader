@@ -110,11 +110,11 @@ def _load_vga_font() -> str:
     return _UI_FONT_FAMILY
 
 
-_UI_FONT_OFFSET = 0   # adjusted by ; and ' keys
+_UI_FONT_OFFSET_ref = [0]   # mutable so no 'global' needed in methods
 
 
 def _ui_font(size: int = 10, bold: bool = False) -> QFont:
-    f = QFont(_UI_FONT_FAMILY, max(6, size + _UI_FONT_OFFSET))
+    f = QFont(_UI_FONT_FAMILY, max(6, size + _UI_FONT_OFFSET_ref[0]))
     if bold:
         f.setWeight(QFont.Weight.Bold)
     return f
@@ -1839,14 +1839,12 @@ class ReaderWidget(QWidget):
             self.config.set("ui_border_width", str(max(1, cur-1)))
             self.update()
         elif k == Qt.Key.Key_Semicolon:
-            global _UI_FONT_OFFSET
-            _UI_FONT_OFFSET += 1
-            self.config.set("ui_font_offset", str(_UI_FONT_OFFSET))
+            _UI_FONT_OFFSET_ref[0] += 1
+            self.config.set("ui_font_offset", str(_UI_FONT_OFFSET_ref[0]))
             self.update()
         elif k == Qt.Key.Key_Apostrophe:
-            global _UI_FONT_OFFSET
-            _UI_FONT_OFFSET = max(-6, _UI_FONT_OFFSET - 1)
-            self.config.set("ui_font_offset", str(_UI_FONT_OFFSET))
+            _UI_FONT_OFFSET_ref[0] = max(-6, _UI_FONT_OFFSET_ref[0] - 1)
+            self.config.set("ui_font_offset", str(_UI_FONT_OFFSET_ref[0]))
             self.update()
         elif k == Qt.Key.Key_0:
             # Undo last line movement
@@ -3350,8 +3348,7 @@ def main():
     _load_vga_font()
     config  = Config()
     _apply_theme(config)
-    global _UI_FONT_OFFSET
-    _UI_FONT_OFFSET = int(config.get("ui_font_offset") or 0)
+    _UI_FONT_OFFSET_ref[0] = int(config.get("ui_font_offset") or 0)
     history = History()
     initial = sys.argv[1] if len(sys.argv) > 1 and os.path.exists(sys.argv[1]) else None
     window  = MainWindow(config, history, initial_file=initial)
