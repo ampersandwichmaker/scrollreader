@@ -215,21 +215,6 @@ def _apply_swatch(name: str, config):
     _apply_theme(config)
 
 
-def _apply_hue(hue: float, config):
-    """Derive a full theme from a single hue (0.0–1.0) via colorsys."""
-    def _hc(h, s, v): return QColor.fromHsvF(h % 1.0, s, v).name()
-    config.data["theme_primary"]  = _hc(hue, 0.8, 1.0)
-    config.data["theme_bright"]   = _hc(hue, 0.6, 1.0)
-    config.data["theme_dim"]      = _hc(hue, 0.8, 0.6)
-    config.data["theme_dark"]     = _hc(hue, 0.8, 0.35)
-    config.data["theme_very_dim"] = _hc(hue, 0.8, 0.15)
-    config.data["theme_inv_bg"]   = _hc(hue, 0.8, 1.0)
-    config.data["theme_inv_fg"]   = "#000000"
-    config.data["theme_bg"]       = "#000000"
-    config.data["hue_override"]   = hue
-    config.save()
-    _apply_theme(config)
-
 
 def _scan_fonts() -> list:
     """Return list of TTF paths in the fonts/ directory."""
@@ -302,7 +287,6 @@ DEFAULT_CONFIG = {
     "ui_border_width":       2,
     "ui_font_offset":        0,
     "current_swatch":        "amber",
-    "hue_override":          None,
     "current_font_idx":      0,
     "eager_pages":           2,             # pages rendered synchronously each side of current
 }
@@ -1337,8 +1321,8 @@ class ReaderWidget(QWidget):
             else:
                 ref = ("SPC/↓ NEXT   ↑/TAB BACK   CTRL+ENTER CMD   "
                        "CTRL+L LIB   CTRL+N/B/H PANELS   "
-                       "CTRL+I SWATCH   CTRL+O/P HUE   "
-                       "CTRL+,/. FONT   SN/SP/SF/SL SEARCH   CC REPEAT")
+                       "CTRL+O/P SWATCH   CTRL+,/. FONT   "
+                       "SN/SP/SF/SL SEARCH   CC REPEAT")
             painter.drawText(6, h - 8, ref)
 
     # ── Margin indicators ─────────────────────────────────────────────────
@@ -1997,12 +1981,7 @@ class ReaderWidget(QWidget):
                 pass; return   # handled by MainWindow
             if k == Qt.Key.Key_Period:
                 pass; return   # handled by MainWindow
-            if k == Qt.Key.Key_O:
-                pass; return   # handled by MainWindow
-            if k == Qt.Key.Key_P:
-                pass; return   # handled by MainWindow
-            if k == Qt.Key.Key_I:
-                pass; return   # handled by MainWindow
+
 
             return  # eat unhandled Ctrl combos
 
@@ -2104,16 +2083,12 @@ class ReaderWidget(QWidget):
         QTimer.singleShot(2000, self._clear_status)
         self.update()
 
-    def _cycle_hue(self, delta: float):
-        """Step the hue wheel by delta (0.0–1.0)."""
-        cur = float(self.config.get("hue_override") or 0.1)
-        _apply_hue((cur + delta) % 1.0, self.config)
-        self._update_cmd_style()
-        self.update()
 
-    def _cycle_swatch(self):
+    def _cycle_swatch(self, direction: int = 1):
         """Cycle through handmade swatches."""
-        idx  = (SWATCH_NAMES.index(self.config.get("current_swatch") or "amber") + 1) % len(SWATCH_NAMES)
+        cur  = self.config.get("current_swatch") or "amber"
+        idx  = SWATCH_NAMES.index(cur) if cur in SWATCH_NAMES else 0
+        idx  = (idx + direction) % len(SWATCH_NAMES)
         name = SWATCH_NAMES[idx]
         _apply_swatch(name, self.config)
         _current_swatch_ref[0] = idx
@@ -2976,47 +2951,39 @@ class LibraryWidget(QWidget):
         for idx, (b, rect) in enumerate(visible_pairs):
             selected = (idx == self._cursor_idx) and not self._cmd_mode
 
-            color = _adjust_sat(b["color"], sat)
             if selected:
-                painter.fillRect(rect, AMBER_INV_BG)
-                text_primary = AMBER_INV_FG
-                text_dim     = QColor(60, 40, 0)
-                text_darker  = QColor(80, 60, 0)
+                interior = AMBER_INV_BG
+                border   = AMBER_BRIGHT
+                txt_col  = AMBER_INV_FG
             else:
-                painter.fillRect(rect, color)
-                painter.fillRect(rect, QColor(0, 0, 0, 120))
-                text_primary = AMBER_BRIGHT
-                text_dim     = AMBER_DIM
-                text_darker  = AMBER_DARK
+                interior = AMBER_DARK
+                border   = AMBER
+                txt_col  = AMBER_BRIGHT
 
-            accent = AMBER_INV_FG if selected else _adjust_sat(b["color"], min(sat*1.3, 1.0))
-            painter.fillRect(QRect(rect.x(), rect.y(), 4, rect.height()), accent)
-
-            painter.setPen(AMBER_BRIGHT if selected else QColor(255, 255, 255, 20))
+            painter.fillRect(rect, interior)
+            painter.setPen(border)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(rect)
 
             if b["favorite"]:
-                painter.setPen(AMBER_BRIGHT if not selected else AMBER_INV_FG)
+                painter.setPen(txt_col)
                 painter.setFont(_ui_font(10))
                 painter.drawText(QRect(rect.x()+rect.width()-20, rect.y()+4, 16, 16),
                                  Qt.AlignmentFlag.AlignCenter, "★")
 
-            inner  = QRect(rect.x()+10, rect.y()+8, rect.width()-20, rect.height()-16)
+            inner  = QRect(rect.x()+8, rect.y()+6, rect.width()-16, rect.height()-12)
             line_h = 16
             metar  = f"N{b['notes']}B{b['bookmarks']}H{b['highlights']}R{int(b['line']/max(b['total'],1)*100)}P{b['total_pages']}"
-            # All text same color within a box for readability
-            txt_col = AMBER_INV_FG if selected else AMBER_BRIGHT
             texts  = [
-                (metar,       mono,   txt_col),
-                (b["title"],  mono_b, txt_col),
-                (b["author"], mono,   txt_col),
+                (metar,       _ui_font(8),            txt_col),
+                (b["title"],  _ui_font(9, bold=True), txt_col),
+                (b["author"], _ui_font(8),            txt_col),
             ]
             ty = inner.top()
             for txt, font, col in texts:
                 if ty + line_h > inner.bottom(): break
                 painter.setFont(font); painter.setPen(col)
-                painter.drawText(rect.x()+10, ty+line_h-2,
+                painter.drawText(rect.x()+8, ty+line_h-2,
                     QFontMetrics(font).elidedText(
                         txt, Qt.TextElideMode.ElideRight, inner.width()))
                 ty += line_h
@@ -3538,12 +3505,10 @@ class MainWindow(QMainWindow):
         if ctrl:
             if k == Qt.Key.Key_L:
                 self.show_library(); return
-            if k == Qt.Key.Key_I:
-                self.reader._cycle_swatch(); return
             if k == Qt.Key.Key_O:
-                self.reader._cycle_hue(-0.02); return
+                self.reader._cycle_swatch(-1); return
             if k == Qt.Key.Key_P:
-                self.reader._cycle_hue(0.02); return
+                self.reader._cycle_swatch(1); return
             if k == Qt.Key.Key_Comma:
                 self.reader._cycle_font(-1); return
             if k == Qt.Key.Key_Period:
@@ -3562,13 +3527,8 @@ def main():
     app.setApplicationName("ScrollReader")
     _load_vga_font()
     config  = Config()
-    # Apply saved swatch or hue
-    hue = config.get("hue_override")
-    if hue is not None:
-        _apply_hue(float(hue), config)
-    else:
-        swatch = config.get("current_swatch") or "amber"
-        _apply_swatch(swatch, config)
+    swatch = config.get("current_swatch") or "amber"
+    _apply_swatch(swatch, config)
     _apply_theme(config)
     _UI_FONT_OFFSET_ref[0] = int(config.get("ui_font_offset") or 0)
     # Load saved font
