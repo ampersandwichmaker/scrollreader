@@ -20,27 +20,15 @@ jobs:
         run: |
           pip install PyMuPDF PyQt6 pyinstaller Pillow
 
-      - name: Generate icon
-        run: python tools/generate_icon.py
-
       - name: Build exe with PyInstaller
         run: |
-          pyinstaller --onefile --windowed --name ScrollReader --icon=assets/icon.ico scrollreader.py
+          pyinstaller --onefile --windowed --name ScrollReader --icon=assets/icon.ico --add-data "fonts;fonts" scrollreader.py
 
-      - name: Install NSIS
-        run: choco install nsis --yes
-
-      - name: Build Windows installer with NSIS
-        uses: joncloud/makensis-action@v4
-        with:
-          script-file: installer/windows/installer.nsi
-          arguments: /DVERSION=${{ github.ref_name }}
-
-      - name: Upload Windows installer
+      - name: Upload Windows exe
         uses: actions/upload-artifact@v4
         with:
-          name: windows-installer
-          path: installer/windows/ScrollReader_Setup_*.exe
+          name: windows-exe
+          path: dist/ScrollReader.exe
 
   build-linux:
     runs-on: ubuntu-latest
@@ -68,7 +56,7 @@ jobs:
 
       - name: Build Linux binary
         run: |
-          pyinstaller --onefile --name scrollreader scrollreader.py
+          pyinstaller --onefile --name scrollreader --add-data "fonts:fonts" scrollreader.py
 
       - name: Make tarball
         run: |
@@ -106,7 +94,7 @@ jobs:
             ## ScrollReader ${{ github.ref_name }}
 
             ### Downloads
-            - **Windows**: `ScrollReader_Setup_*.exe` — full installer with Start Menu shortcut and uninstaller
+            - **Windows**: `ScrollReader.exe` — portable, double-click to run, no install needed
             - **Linux**: `scrollreader-linux-*.tar.gz` — standalone binary, no Python needed
 
             ### Install from source
@@ -117,7 +105,7 @@ jobs:
 
             See [README](https://github.com/ampersandwichmaker/scrollreader#readme) for full command reference.
           files: |
-            artifacts/windows-installer/*.exe
+            artifacts/windows-exe/ScrollReader.exe
             artifacts/linux-binary/*.tar.gz
           draft: false
           prerelease: false

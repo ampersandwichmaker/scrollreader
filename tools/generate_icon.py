@@ -7,8 +7,8 @@ Requires: pip install Pillow
 """
 
 from pathlib import Path
-from PIL import Image, ImageDraw
-
+from PIL import Image, ImageDraw, ImageFont
+import struct, zlib, io
 
 def make_icon(size=256):
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -42,13 +42,14 @@ def make_icon(size=256):
 
 
 def save_ico(img, path):
+    """Save a PIL image as .ico with multiple sizes."""
     sizes = [16, 32, 48, 64, 128, 256]
     imgs  = [img.resize((s, s), Image.LANCZOS) for s in sizes]
     img.save(path, format="ICO", sizes=[(s, s) for s in sizes])
 
 
 def main():
-    assets = Path(__file__).parent.parent / "assets"
+    assets = Path(__file__).parent / "assets"
     assets.mkdir(exist_ok=True)
 
     img = make_icon(256)
