@@ -65,7 +65,76 @@ from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QLineEdit
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui import (QPainter, QColor, QFont, QPixmap, QImage,
                           QKeyEvent, QPolygon, QWheelEvent, QMouseEvent,
-                          QFontMetrics)
+                          QFontMetrics, QFontDatabase)
+
+# ---------------------------------------------------------------------------
+# Amber phosphor theme
+# ---------------------------------------------------------------------------
+
+AMBER         = QColor("#ffbb33")   # primary UI text / elements
+AMBER_BRIGHT  = QColor("#ffb000")   # emphasis, indicator, active
+AMBER_DIM     = QColor("#996600")   # secondary / labels
+AMBER_DARK    = QColor("#553300")   # borders, separators
+AMBER_VERY_DIM= QColor("#332200")   # very subtle borders
+AMBER_INV_BG  = QColor("#ffbb33")   # inverse background (selected)
+AMBER_INV_FG  = QColor("#000000")   # inverse foreground
+UI_BG         = QColor("#000000")   # pure black background
+
+# Amber swatch for library blocks — brightness variations
+DEFAULT_SWATCH = [
+    "#ffbb33", "#e69900", "#cc7700", "#b36200",
+    "#ff9900", "#ffcc66", "#cc8800", "#aa5500",
+    "#ff8800", "#d4a017",
+]
+
+_UI_FONT_FAMILY = "Courier New"   # replaced at startup if VGA font loads
+
+
+def _load_vga_font() -> str:
+    """Try to load IBM VGA 8x16 font from fonts/ dir. Returns family name."""
+    global _UI_FONT_FAMILY
+    import os
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "Px437_IBM_VGA_8x16.ttf"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "Web437_IBM_VGA_8x16.ttf"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            fid = QFontDatabase.addApplicationFont(path)
+            if fid >= 0:
+                families = QFontDatabase.applicationFontFamilies(fid)
+                if families:
+                    _UI_FONT_FAMILY = families[0]
+                    return families[0]
+    return _UI_FONT_FAMILY
+
+
+def _ui_font(size: int = 10, bold: bool = False) -> QFont:
+    f = QFont(_UI_FONT_FAMILY, size)
+    if bold:
+        f.setWeight(QFont.Weight.Bold)
+    return f
+
+
+def _mk_pen(color: QColor, width: int = 1) -> 'QPen':
+    from PyQt6.QtGui import QPen
+    p = QPen(color)
+    p.setWidth(width)
+    return p
+
+
+def _apply_theme(config):
+    """Update global theme colors from config."""
+    global AMBER, AMBER_BRIGHT, AMBER_DIM, AMBER_DARK, AMBER_VERY_DIM
+    global AMBER_INV_BG, AMBER_INV_FG, UI_BG
+    AMBER          = QColor(config.get("theme_primary")  or "#ffbb33")
+    AMBER_BRIGHT   = QColor(config.get("theme_bright")   or "#ffb000")
+    AMBER_DIM      = QColor(config.get("theme_dim")      or "#996600")
+    AMBER_DARK     = QColor(config.get("theme_dark")     or "#553300")
+    AMBER_VERY_DIM = QColor(config.get("theme_very_dim") or "#332200")
+    AMBER_INV_BG   = QColor(config.get("theme_inv_bg")   or "#ffbb33")
+    AMBER_INV_FG   = QColor(config.get("theme_inv_fg")   or "#000000")
+    UI_BG          = QColor(config.get("theme_bg")       or "#000000")
 try:
     from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
     HAS_PRINT = True
@@ -76,7 +145,12 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 
-STATUS_BAR_H = 28
+TOP_BAR_H    = 28   # top info bar
+BOTTOM_BAR_H = 28   # bottom controls/command bar
+L_MARGIN     = 0    # no left margin
+R_MARGIN     = 0    # no right margin (legacy, kept for compat)
+PANEL_W      = 160  # single margin width (reading + panel mode)
+BORDER_W     = 2    # default border width
 APP_DIR      = Path.home() / ".scrollreader"
 CONFIG_PATH  = APP_DIR / "config.json"
 HISTORY_PATH = APP_DIR / "history.json"
@@ -86,17 +160,17 @@ DEFAULT_CONFIG = {
     "midpoint":              0.42,
     "zoom_mode":             "fit-width",
     "zoom_fixed":            1.5,
-    "indicator_color":       "#ff4444",
+    "indicator_color":       "#ffb000",   # amber bright
     "highlight_alpha":       35,
     "highlight_height":      20,
     "highlight_offset":      0,
-    "saved_highlight_color": "#4488ff",
-    "saved_highlight_alpha": 45,
-    "bookmark_color":        "#ffaa00",
-    "note_color":            "#44ff88",
-    "background_color":      "#1a1a1a",
-    "statusbar_color":       "#111111",
-    "statusbar_text_color":  "#888888",
+    "saved_highlight_color": "#ffb000",
+    "saved_highlight_alpha": 30,
+    "bookmark_color":        "#ffbb33",
+    "note_color":            "#ffbb33",
+    "background_color":      "#000000",
+    "statusbar_color":       "#000000",
+    "statusbar_text_color":  "#ffbb33",
     "page_gap":              30,
     "export_dir":            "",
     "export_mode":           "timestamped",
@@ -104,7 +178,17 @@ DEFAULT_CONFIG = {
     "library_recursive":     False,
     "library_swatch":        [],            # empty = use built-in swatch
     "read_tab_sizing":       "flat",
-    "eager_pages":           8,             # pages rendered synchronously around current position
+    "theme_primary":         "#ffbb33",
+    "theme_bright":          "#ffb000",
+    "theme_dim":             "#996600",
+    "theme_dark":            "#553300",
+    "theme_very_dim":        "#332200",
+    "theme_inv_bg":          "#ffbb33",
+    "theme_inv_fg":          "#000000",
+    "theme_bg":              "#000000",
+    "margin_side":           "right",    # "left" or "right"
+    "ui_border_width":       2,          # thickness of UI borders/lines
+    "eager_pages":           2,             # pages rendered synchronously each side of current
 }
 
 ZOOM_MODES = ["fit-width", "fit-page", "50%", "75%", "100%"]
@@ -654,13 +738,23 @@ class ReaderWidget(QWidget):
         self.document: Optional[PDFDocument] = None
         self.current_line    = 0
         self.command_mode    = False
-        self.status_text     = "ScrollReader  —  Enter for command mode  —  open <path>"
+        self.status_text     = ""
         self.zoom_mode: str  = str(self.config.get("zoom_mode") or "fit-width")
-        self.panel: Optional[dict]     = None  # annotation panel
-        self._panel_scroll: int        = 0     # scroll offset for panels
-        self._pending: Optional[dict]  = None  # y/n confirmation
-        self._panel_rects: list        = []    # [(QRect, line_index)] for click detection
+        self.panel: Optional[dict]     = None
+        self._panel_scroll: int        = 0
+        self._pending: Optional[dict]  = None
+        self._panel_rects: list        = []
         self._render_thread: Optional[RenderThread] = None
+        self._cmd_history:   list[str] = []
+        self._cmd_history_idx: int     = -1
+        # New state
+        self._line_history:  list[int] = []   # movement undo stack (max 50)
+        self._panel_mode: Optional[str] = None  # 'bookmarks'/'notes'/'highlights'
+        self._panel_cursor: int        = 0
+        self._pre_panel_line: int      = 0
+        self._search_term: str         = ''
+        self._search_re:    Optional[re.Pattern] = None
+        self._last_command: str        = ''
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(600, 400)
@@ -673,11 +767,11 @@ class ReaderWidget(QWidget):
         self.cmd.installEventFilter(self)
         self.cmd.setStyleSheet("""
             QLineEdit {
-                background-color: #1e1e1e; color: #e0e0e0;
-                border: none; border-top: 1px solid #333;
+                background-color: #000000; color: #ffbb33;
+                border: none; border-top: 1px solid #553300;
                 padding: 3px 10px;
-                font-family: "Courier New", monospace; font-size: 13px;
-                selection-background-color: #444;
+                font-family: "IBM VGA 8x16", "Courier New", monospace; font-size: 13px;
+                selection-background-color: #ffbb33; selection-color: #000000;
             }
         """)
 
@@ -691,10 +785,27 @@ class ReaderWidget(QWidget):
             if k == Qt.Key.Key_Escape:
                 self._exit_command_mode()
                 return True
+            if k == Qt.Key.Key_Up and self._cmd_history:
+                if self._cmd_history_idx < len(self._cmd_history) - 1:
+                    self._cmd_history_idx += 1
+                entry = self._cmd_history[-(self._cmd_history_idx + 1)]
+                self.cmd.setText(":" + entry)
+                self.cmd.setCursorPosition(len(self.cmd.text()))
+                return True
+            if k == Qt.Key.Key_Down and self._cmd_history:
+                if self._cmd_history_idx > 0:
+                    self._cmd_history_idx -= 1
+                    entry = self._cmd_history[-(self._cmd_history_idx + 1)]
+                    self.cmd.setText(":" + entry)
+                else:
+                    self._cmd_history_idx = -1
+                    self.cmd.setText(":")
+                self.cmd.setCursorPosition(len(self.cmd.text()))
+                return True
         return super().eventFilter(obj, event)
 
     def resizeEvent(self, ev):
-        self.cmd.setGeometry(0, self.height()-26, self.width(), 26)
+        self.cmd.setGeometry(0, self.height()-BOTTOM_BAR_H, self.width(), BOTTOM_BAR_H)
         super().resizeEvent(ev)
 
     def _cfg(self, key):
@@ -717,6 +828,12 @@ class ReaderWidget(QWidget):
             zoom = self._compute_zoom(self.zoom_mode, peek_path=filepath)
             doc  = PDFDocument(filepath, zoom=zoom, page_gap=int(self.config.get("page_gap")))
 
+            # Recompute zoom now that we have exact natural dimensions
+            # (handles fit-width/fit-page more accurately than the peek)
+            zoom2 = self._compute_zoom_for_doc(self.zoom_mode, doc)
+            if abs(zoom2 - zoom) > 0.01:
+                doc = PDFDocument(filepath, zoom=zoom2, page_gap=int(self.config.get("page_gap")))
+
             # Metadata
             meta = doc.doc.metadata
             e    = self.history._entry(filepath)
@@ -731,10 +848,9 @@ class ReaderWidget(QWidget):
 
             # Synchronously render pages around current position
             cur_page  = doc.lines[self.current_line].page_num if doc.lines else 0
-            eager     = int(self.config.get("eager_pages") or 8)
-            doc.render_range(cur_page - 2, cur_page + eager)
+            eager     = int(self.config.get("eager_pages") or 2)
+            doc.render_range(cur_page - eager, cur_page + eager)
 
-            self._update_status()
             self.update()
 
             # Background-render the rest
@@ -763,25 +879,33 @@ class ReaderWidget(QWidget):
             self.document.page_pixmaps[pn] = pixmap
             # Only repaint if this page is currently visible
             scroll = self._scroll_offset()
-            py     = STATUS_BAR_H + self.document.page_offsets[pn] - scroll
+            py     = TOP_BAR_H + self.document.page_offsets[pn] - scroll
             _, ph  = self.document.page_sizes[pn]
-            if py + ph >= STATUS_BAR_H and py <= self.height():
+            if py + ph >= TOP_BAR_H and py <= self.height():
                 self.update()
             # Update status to show render progress
             rendered = sum(1 for p in self.document.page_pixmaps if p is not None)
             total    = self.document.page_count
             if rendered < total:
-                pct = f"{100*rendered//total}%"
-                self._update_status()
-                self.status_text += f"  —  rendering {pct}"
                 self.update()
 
     def _on_render_done(self):
         self._render_thread = None
-        self._update_status()
         self.update()
 
     # ---------------------------------------------------------------- zoom
+
+    def _compute_zoom_for_doc(self, mode: str, doc: 'PDFDocument') -> float:
+        nw, nh = doc.natural_width, doc.natural_height
+        vp = self._vp()
+        uw = vp.width()  - 40
+        uh = vp.height() - 40
+        if mode == "fit-width": return max(0.1, uw / nw)
+        if mode == "fit-page":  return max(0.1, uh / nh)
+        if mode == "50%":  return 0.75
+        if mode == "75%":  return 1.1
+        if mode == "100%": return 1.5
+        return float(self.config.get("zoom_fixed") or 1.5)
 
     def _compute_zoom(self, mode, peek_path=None):
         nw, nh = 612.0, 792.0
@@ -791,8 +915,9 @@ class ReaderWidget(QWidget):
             try:
                 d = fitz.open(peek_path); r = d[0].rect; nw, nh = r.width, r.height; d.close()
             except Exception: pass
-        uw = self.width() - 40
-        uh = self.height() - STATUS_BAR_H - 40
+        vp = self._vp()
+        uw = vp.width()  - 40
+        uh = vp.height() - 40
         if mode == "fit-width": return max(0.1, uw/nw)
         if mode == "fit-page":  return max(0.1, uh/nh)
         if mode == "50%":  return 0.75
@@ -803,20 +928,40 @@ class ReaderWidget(QWidget):
     def _rerender(self):
         if not self.document: return
         old = self.current_line
-        self.status_text = f"rendering [{self.zoom_mode}]…"
         self.update(); QApplication.processEvents()
         try:
             self.load_document(self.document.filepath)
             self.current_line = min(old, max(0, len(self.document.lines)-1))
-            self._update_status()
         except Exception as ex:
-            self.status_text = f"render error: {ex}"
+            pass
         self.update()
 
     # -------------------------------------------------------------- helpers
 
-    def _usable_h(self):  return self.height() - STATUS_BAR_H
-    def _midpoint_y(self): return self._usable_h() * float(self.config.get("midpoint"))
+    def _margin_side(self) -> str:
+        return str(self.config.get("margin_side") or "right")
+
+    def _bw(self) -> int:
+        return max(1, int(self.config.get("ui_border_width") or 2))
+
+    def _vp(self) -> QRect:
+        """PDF viewport — full window minus the single margin and bars."""
+        side = self._margin_side()
+        if side == "left":
+            return QRect(PANEL_W, TOP_BAR_H,
+                         self.width() - PANEL_W,
+                         self.height() - TOP_BAR_H - BOTTOM_BAR_H)
+        else:
+            return QRect(0, TOP_BAR_H,
+                         self.width() - PANEL_W,
+                         self.height() - TOP_BAR_H - BOTTOM_BAR_H)
+
+    def _usable_h(self):
+        return self._vp().height()
+
+    def _midpoint_y(self):
+        return self._vp().height() * float(self.config.get("midpoint"))
+
     def _lh(self):   return max(8, int(self._cfg("highlight_height") or 20))
     def _voff(self): return int(self._cfg("highlight_offset") or 0)
 
@@ -828,30 +973,48 @@ class ReaderWidget(QWidget):
         return min(ly - mp, max(0, self.document.total_height - self._usable_h()))
 
     def _indicator_screen_y(self):
+        vp = self._vp()
         if not self.document or not self.document.lines:
-            return STATUS_BAR_H + int(self._midpoint_y())
-        return STATUS_BAR_H + int(self.document.lines[self.current_line].abs_y - self._scroll_offset())
+            return vp.y() + int(self._midpoint_y())
+        return vp.y() + int(self.document.lines[self.current_line].abs_y - self._scroll_offset())
 
     def _page_x_offset(self):
-        if not self.document: return 0
-        return max(0, (self.width() - self.document.max_width) // 2)
+        if not self.document: return L_MARGIN
+        vp = self._vp()
+        return vp.x() + max(0, (vp.width() - self.document.max_width) // 2)
 
     def _lines_per_screen(self):
         if not self.document or not self.document.lines: return 10
         avg = self.document.total_height / len(self.document.lines)
         return max(1, int(self._usable_h() / avg) - 2)
 
-    def _update_status(self):
-        if not self.document or not self.document.lines: return
-        line  = self.document.lines[self.current_line]
+    def _metar(self) -> str:
+        """METAR string for current document."""
+        if not self.document: return ""
+        e     = self.history._entry(self.document.filepath)
         total = len(self.document.lines)
-        pct   = f"{100*self.current_line/total:.0f}%" if total else "?"
-        self.status_text = (
-            f"{Path(self.document.filepath).name}"
-            f"  —  line {self.current_line+1}/{total} ({pct})"
-            f"  —  page {line.page_num+1}/{self.document.page_count}"
-            f"  —  [{self.zoom_mode}]"
-        )
+        cur   = self.current_line
+        pct   = int(cur / max(total, 1) * 100)
+        n  = len(e.get("notes", []))
+        b  = len(e.get("bookmarks", []))
+        h  = len(e.get("highlights", []))
+        return f"N{n}B{b}H{h}R{pct}P{len(self.document.doc)}"
+
+    def _update_status(self):
+        pass   # status now lives in top bar, no separate status_text needed
+
+    def _push_history(self, line: int):
+        """Push a line to movement history (max 50)."""
+        if self._line_history and self._line_history[-1] == line:
+            return
+        self._line_history.append(line)
+        if len(self._line_history) > 50:
+            self._line_history.pop(0)
+
+    def _pop_history(self) -> Optional[int]:
+        if self._line_history:
+            return self._line_history.pop()
+        return None
 
     def _resolve_line_range(self, rs: RangeSpec) -> tuple:
         total = len(self.document.lines)
@@ -882,108 +1045,419 @@ class ReaderWidget(QWidget):
     def paintEvent(self, ev):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor(self.config.get("background_color")))
+        w, h = self.width(), self.height()
+
+        # Black background
+        painter.fillRect(self.rect(), UI_BG)
 
         if not self.document:
-            painter.setPen(QColor("#444444"))
-            painter.setFont(QFont("Courier New", 13))
-            r = QRect(0, STATUS_BAR_H, self.width(), self.height()-STATUS_BAR_H)
-            painter.drawText(r, Qt.AlignmentFlag.AlignCenter, "Enter command mode → open <path>")
-            self._paint_statusbar(painter)
+            self._paint_top_bar(painter)
+            self._paint_bottom_bar(painter)
+            painter.setPen(AMBER_DARK)
+            painter.setFont(_ui_font(13))
+            vp = self._vp()
+            painter.drawText(vp, Qt.AlignmentFlag.AlignCenter,
+                             "ENTER COMMAND MODE AND TYPE:  OPEN <PATH>")
+            self._paint_frame(painter)
             return
 
         scroll = self._scroll_offset()
         px     = self._page_x_offset()
         lh     = self._lh()
         voff   = self._voff()
+        vp     = self._vp()
         dlines = self.document.lines
         total  = len(dlines)
 
-        # Pages
+        # ── Pages ─────────────────────────────────────────────────────────
         for i in range(self.document.page_count):
-            py = STATUS_BAR_H + self.document.page_offsets[i] - scroll
+            py = vp.y() + self.document.page_offsets[i] - scroll
             pw, ph = self.document.page_sizes[i]
-            if py + ph >= STATUS_BAR_H and py <= self.height():
+            if py + ph >= vp.y() and py <= vp.bottom():
                 painter.drawPixmap(px, int(py), self.document.get_pixmap(i))
 
-        # Saved highlights (blue)
-        sh_col = QColor(self._cfg("saved_highlight_color") or "#4488ff")
-        sh_col.setAlpha(int(self._cfg("saved_highlight_alpha") or 45))
-        for h in self.history._entry(self.document.filepath).get("highlights", []):
-            sl, el = h.get("start_line",0), h.get("end_line",0)
+        # ── Saved highlights (on PDF) ──────────────────────────────────────
+        sh_col = QColor(self._cfg("saved_highlight_color") or AMBER.name())
+        sh_col.setAlpha(int(self._cfg("saved_highlight_alpha") or 30))
+        for hh in self.history._entry(self.document.filepath).get("highlights", []):
+            sl, el = hh.get("start_line",0), hh.get("end_line",0)
             if sl >= total or el >= total: continue
-            sy = int(STATUS_BAR_H + dlines[sl].abs_y - scroll + voff)
-            ey = int(STATUS_BAR_H + dlines[el].abs_y - scroll + voff + lh)
-            if ey >= STATUS_BAR_H and sy <= self.height():
+            sy = int(vp.y() + dlines[sl].abs_y - scroll + voff)
+            ey = int(vp.y() + dlines[el].abs_y - scroll + voff + lh)
+            if ey >= vp.y() and sy <= vp.bottom():
                 painter.fillRect(QRect(px, sy, self.document.max_width, ey-sy), sh_col)
 
-        # Bookmark markers (amber triangle)
-        bm_col = QColor(self._cfg("bookmark_color") or "#ffaa00")
-        painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(bm_col)
-        for bm in self.history._entry(self.document.filepath).get("bookmarks", []):
-            bl = bm.get("line",0)
-            if bl >= total: continue
-            by = int(STATUS_BAR_H + dlines[bl].abs_y - scroll + voff)
-            if STATUS_BAR_H <= by <= self.height():
-                tx = max(2, px-16)
-                painter.drawPolygon(QPolygon([QPoint(tx,by), QPoint(tx,by+lh), QPoint(tx+10,by+lh//2)]))
-
-        # Note markers (green dot)
-        nc = QColor(self._cfg("note_color") or "#44ff88")
-        painter.setBrush(nc)
-        for n in self.history._entry(self.document.filepath).get("notes", []):
-            nl = n.get("line",0)
-            if nl >= total: continue
-            ny = int(STATUS_BAR_H + dlines[nl].abs_y - scroll + voff + lh//2)
-            if STATUS_BAR_H <= ny <= self.height():
-                painter.drawEllipse(QPoint(max(2, px-28), ny), 4, 4)
-
-        # Current-line highlight
+        # ── Current-line highlight band ────────────────────────────────────
         ind_y = self._indicator_screen_y() + voff
-        painter.fillRect(QRect(0, ind_y-2, self.width(), lh),
+        painter.fillRect(QRect(px, ind_y-2, self.document.max_width, lh),
                          QColor(255, 68, 68, int(self._cfg("highlight_alpha"))))
 
-        # Current-line indicator triangle
-        ind_col = QColor(self._cfg("indicator_color"))
-        painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(ind_col)
-        tx = max(2, px-16); ty = ind_y + lh//2; sz = 10
-        painter.drawPolygon(QPolygon([QPoint(tx,ty-sz//2), QPoint(tx,ty+sz//2), QPoint(tx+sz,ty)]))
+        # ── Margins ────────────────────────────────────────────────────────
+        self._paint_margin(painter, scroll, voff, vp, dlines, total, lh, ind_y)
 
-        # Status bar (on top)
-        self._paint_statusbar(painter)
+        # ── Frame & bars (on top of everything) ───────────────────────────
+        self._paint_frame(painter)
+        self._paint_top_bar(painter)
+        self._paint_bottom_bar(painter)
 
-        # Panels and overlays
-        if self.panel:
-            if self.panel.get("kind") == "help":
-                self._paint_help_panel(painter)
+        # ── Overlays ──────────────────────────────────────────────────────
+        if self.panel and self.panel.get("kind") == "help":
+            self._paint_help_panel(painter)
+        if self._pending:
+            self._paint_confirm(painter)
+
+    # ── Frame & bars ──────────────────────────────────────────────────────
+
+    def _paint_frame(self, painter: QPainter):
+        w, h = self.width(), self.height()
+        bw   = self._bw()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillRect(QRect(0, 0, w, bw), AMBER_DARK)
+        painter.fillRect(QRect(0, h-bw, w, bw), AMBER_DARK)
+        painter.fillRect(QRect(0, bw, bw, h-bw*2), AMBER_DARK)
+        painter.fillRect(QRect(w-bw, bw, bw, h-bw*2), AMBER_DARK)
+        painter.setPen(AMBER)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(QRect(bw, bw, w-bw*2-1, h-bw*2-1))
+
+    def _paint_top_bar(self, painter: QPainter):
+        w = self.width()
+        painter.fillRect(QRect(0, 0, w, TOP_BAR_H), UI_BG)
+        # Bottom separator
+        painter.setPen(AMBER_DARK)
+        painter.setPen(_mk_pen(AMBER_DARK, self._bw())); painter.drawLine(0, TOP_BAR_H-1, w, TOP_BAR_H-1)
+
+        font_b = _ui_font(9, bold=True)
+        font   = _ui_font(9)
+        ty     = TOP_BAR_H - 8
+
+        if self.document and self.document.lines:
+            line  = self.document.lines[self.current_line]
+            total = len(self.document.lines)
+            # Left: LINE ##/### PAGE ##/### METAR
+            left_txt = (f"LINE {self.current_line+1}/{total}"
+                        f"  PAGE {line.page_num+1}/{self.document.page_count}"
+                        f"  {self._metar()}")
+            painter.setPen(AMBER)
+            painter.setFont(font_b)
+            painter.drawText(L_MARGIN + 6, ty, left_txt)
+
+            # Centre: TITLE, AUTHOR
+            e    = self.history._entry(self.document.filepath)
+            title  = (e.get("title") or Path(self.document.filepath).stem)[:28]
+            author = (e.get("author") or "")[:20]
+            centre_txt = f"{title}{',  '+author if author else ''}"
+            painter.setPen(AMBER_BRIGHT)
+            painter.setFont(font_b)
+            fm  = QFontMetrics(font_b)
+            cx  = (w - fm.horizontalAdvance(centre_txt)) // 2
+            painter.drawText(cx, ty, centre_txt)
+
+            # Right: MODE
+            mode_map = {None: "READING", "bookmarks": "BOOKMARK VIEW",
+                        "notes": "NOTE VIEW", "highlights": "HIGHLIGHT VIEW"}
+            mode_txt = mode_map.get(self._panel_mode, "READING") + " MODE"
+            painter.setPen(AMBER_DIM)
+            painter.setFont(font)
+            painter.drawText(w - PANEL_W - fm.horizontalAdvance(mode_txt) - 8
+                             if self._margin_side() == "right"
+                             else PANEL_W + 8, ty, mode_txt)
+        else:
+            painter.setPen(AMBER_DIM)
+            painter.setFont(font_b)
+            painter.drawText(L_MARGIN + 6, ty, "SCROLLREADER")
+
+    def _paint_bottom_bar(self, painter: QPainter):
+        w, h = self.width(), self.height()
+        y    = h - BOTTOM_BAR_H
+
+        if self.command_mode:
+            # Full amber inverse — command bar
+            painter.fillRect(QRect(0, y, w, BOTTOM_BAR_H), AMBER_INV_BG)
+            painter.setPen(AMBER_INV_FG)
+            painter.setFont(_ui_font(9, bold=True))
+            # cmd widget is positioned here, just draw the colon hint
+            painter.drawText(6, h - 8, ":")
+        else:
+            painter.fillRect(QRect(0, y, w, BOTTOM_BAR_H), UI_BG)
+            painter.setPen(AMBER_DARK)
+            painter.setPen(_mk_pen(AMBER_DARK, self._bw())); painter.drawLine(0, y, w, y)
+            painter.setPen(AMBER_DIM)
+            painter.setFont(_ui_font(8))
+
+            if self._panel_mode:
+                ref = "↑↓ NAVIGATE   SPACE SELECT   TAB/ESC BACK"
+            elif self._pending:
+                ref = "Y CONFIRM   N/ESC CANCEL"
+            elif self.status_text:
+                ref = self.status_text
             else:
-                self._paint_panel(painter)
-        if self._pending: self._paint_confirm(painter)
+                ref = ("SPACE/↓ NEXT   ↑/TAB BACK   [ ] HL±1   0 UNDO"
+                       "   SB BKMK   SN NOTES   SH HL   LIB LIBRARY"
+                       "   SN/SP/SF/SL SEARCH   CC REPEAT")
+            painter.drawText(L_MARGIN + 4, h - 8, ref)
+
+    # ── Margin indicators ─────────────────────────────────────────────────
+
+    def _margin_indicator_y(self, line_idx: int, scroll: float, voff: int, vp: QRect) -> int:
+        if not self.document or line_idx >= len(self.document.lines):
+            return -999
+        return int(vp.y() + self.document.lines[line_idx].abs_y - scroll + voff)
+
+    # ── Single margin (reading indicators + panel mode) ───────────────────
+
+    def _margin_rect(self) -> QRect:
+        side = self._margin_side()
+        x = 0 if side == "right" else 0
+        if side == "left":
+            x = 0
+        else:
+            x = self.width() - PANEL_W
+        return QRect(x, TOP_BAR_H, PANEL_W,
+                     self.height() - TOP_BAR_H - BOTTOM_BAR_H)
+
+    def _paint_margin(self, painter, scroll, voff, vp, dlines, total, lh, ind_y):
+        mr   = self._margin_rect()
+        side = self._margin_side()
+        bw   = self._bw()
+        e    = self.history._entry(self.document.filepath)
+
+        # Background
+        painter.fillRect(mr, UI_BG)
+
+        # Border line (on the PDF side)
+        painter.setPen(_mk_pen(AMBER_DARK, self._bw()))
+        if side == "right":
+            painter.drawLine(mr.left(), mr.top(), mr.left(), mr.bottom())
+        else:
+            painter.drawLine(mr.right(), mr.top(), mr.right(), mr.bottom())
+
+        if self._panel_mode:
+            self._paint_panel_list(painter, mr, e, lh)
+        else:
+            self._paint_margin_reading(painter, mr, scroll, voff, vp,
+                                        dlines, total, lh, ind_y, e, side)
+
+    def _paint_margin_reading(self, painter, mr, scroll, voff, vp,
+                               dlines, total, lh, ind_y, e, side):
+        """Reading mode: small indicators + truncated annotation text."""
+        bw      = self._bw()
+        IND_W   = 12   # width of indicator strip
+        TEXT_X  = mr.left() + IND_W + 6 if side == "right" else mr.left() + 6
+        TEXT_W  = PANEL_W - IND_W - 10
+        font    = _ui_font(8)
+        font_b  = _ui_font(8, bold=True)
+        fm      = QFontMetrics(font)
+        painter.setFont(font)
+
+        # Current line indicator (inward-pointing triangle)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(AMBER_BRIGHT)
+        ty = ind_y + lh // 2
+        sz = 7
+        if side == "right":
+            tx = mr.left() + 2
+            painter.drawPolygon(QPolygon([
+                QPoint(tx+sz, ty-sz//2), QPoint(tx+sz, ty+sz//2), QPoint(tx, ty)
+            ]))
+        else:
+            tx = mr.right() - sz - 2
+            painter.drawPolygon(QPolygon([
+                QPoint(tx, ty-sz//2), QPoint(tx, ty+sz//2), QPoint(tx+sz, ty)
+            ]))
+
+        # Collect all visible annotations sorted by Y position
+        items = []
+        for bm in e.get("bookmarks", []):
+            line = bm.get("line", 0)
+            if line >= total: continue
+            ay = self._margin_indicator_y(line, scroll, voff, vp)
+            if vp.top() <= ay <= vp.bottom():
+                items.append(("bookmark", ay, line, bm.get("note", "")))
+
+        for nn in e.get("notes", []):
+            line = nn.get("line", 0)
+            if line >= total: continue
+            ay = self._margin_indicator_y(line, scroll, voff, vp)
+            if vp.top() <= ay <= vp.bottom():
+                items.append(("note", ay, line, nn.get("note", "")))
+
+        for hh in e.get("highlights", []):
+            sl = hh.get("start_line", 0)
+            if sl >= total: continue
+            ay = self._margin_indicator_y(sl, scroll, voff, vp)
+            if vp.top() <= ay <= vp.bottom():
+                items.append(("highlight", ay, sl, hh.get("note", "")))
+
+        # Sort by Y, draw each
+        items.sort(key=lambda x: x[1])
+        last_y = -999
+        for kind, ay, line, note in items:
+            # Small indicator symbol
+            painter.setPen(Qt.PenStyle.NoPen)
+            if kind == "bookmark":
+                painter.setBrush(AMBER)
+                if side == "right":
+                    painter.drawPolygon(QPolygon([
+                        QPoint(mr.left()+2, ay+lh//2),
+                        QPoint(mr.left()+IND_W-2, ay+2),
+                        QPoint(mr.left()+IND_W-2, ay+lh-2)
+                    ]))
+                else:
+                    painter.drawPolygon(QPolygon([
+                        QPoint(mr.right()-2, ay+lh//2),
+                        QPoint(mr.left()+2, ay+2),
+                        QPoint(mr.left()+2, ay+lh-2)
+                    ]))
+            elif kind == "note":
+                painter.setPen(AMBER_DIM)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(QRect(mr.left()+2, ay+lh//2-3, 6, 6))
+                painter.setPen(Qt.PenStyle.NoPen)
+            else:  # highlight
+                painter.fillRect(QRect(mr.left()+2, ay, 4, max(2, lh)), AMBER_DIM)
+
+            # Annotation text (truncated, no overlap)
+            if note and ay > last_y + 10:
+                painter.setPen(AMBER_DIM)
+                painter.setFont(font)
+                truncated = fm.elidedText(note, Qt.TextElideMode.ElideRight, TEXT_W)
+                painter.drawText(TEXT_X, ay + lh - 3, truncated)
+                last_y = ay + lh
+
+        # Highlight bars (thin vertical strip)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for hh in e.get("highlights", []):
+            sl, el = hh.get("start_line",0), hh.get("end_line",0)
+            if sl >= total or el >= total: continue
+            sy = self._margin_indicator_y(sl, scroll, voff, vp)
+            ey = self._margin_indicator_y(el, scroll, voff, vp) + lh
+            if ey >= vp.top() and sy <= vp.bottom():
+                hx = mr.left() + 6
+                painter.fillRect(QRect(hx, sy, 3, max(2, ey-sy)), AMBER_DIM)
+
+    def _paint_panel_list(self, painter, mr, e, lh):
+        """Panel mode: scrollable annotation list."""
+        items    = self._panel_items()
+        font_b   = _ui_font(9, bold=True)
+        font     = _ui_font(9)
+        item_h   = 38
+        py       = mr.top() + 4
+        pw       = mr.width()
+        px       = mr.left()
+        w        = self.width()
+
+        # Mode label
+        painter.setPen(AMBER_DIM)
+        painter.setFont(font_b)
+        mode_label = (self._panel_mode or "").upper()
+        painter.drawText(px+8, py+14, mode_label)
+        painter.setPen(_mk_pen(AMBER_VERY_DIM, self._bw()))
+        painter.drawLine(px+4, py+18, px+pw-4, py+18)
+        py += 22
+
+        if not items:
+            painter.setPen(AMBER_DARK)
+            painter.setFont(font)
+            painter.drawText(QRect(px, py, pw, 40),
+                             Qt.AlignmentFlag.AlignCenter, "(none)")
+            return
+
+        for idx, item in enumerate(items):
+            if py + item_h > mr.bottom() - 4: break
+            selected = (idx == self._panel_cursor)
+
+            line_num = item.get("line", item.get("start_line", 0))
+            note_txt = item.get("note", "")
+            if self._panel_mode == "highlights":
+                loc_str = f"L{line_num+1}-{item.get('end_line',line_num)+1}"
+            else:
+                loc_str = f"L{line_num+1:05d}"
+
+            if selected:
+                painter.fillRect(QRect(px+2, py, pw-4, item_h), AMBER_INV_BG)
+                fg = AMBER_INV_FG
+                fg2 = AMBER_INV_FG
+            else:
+                fg = AMBER
+                fg2 = AMBER_DIM
+
+            painter.setPen(fg); painter.setFont(font_b)
+            painter.drawText(px+8, py+16, loc_str)
+            if note_txt:
+                painter.setFont(font); painter.setPen(fg2)
+                fm = QFontMetrics(font)
+                painter.drawText(px+8, py+30,
+                    fm.elidedText(note_txt, Qt.TextElideMode.ElideRight, pw-16))
+
+            painter.setPen(_mk_pen(AMBER_VERY_DIM, self._bw()))
+            painter.drawLine(px+4, py+item_h, px+pw-4, py+item_h)
+            py += item_h
+
+    def _open_annot_panel(self, mode: str) -> Optional[str]:
+        if not self.document: return "no document open"
+        # Toggle: calling same mode again closes panel
+        if self._panel_mode == mode:
+            self._panel_mode = None
+            self.current_line = self._pre_panel_line
+            self.update()
+            return None
+        self._pre_panel_line = self.current_line
+        self._panel_mode     = mode
+        self._panel_cursor   = 0
+        items = self._panel_items()
+        if items:
+            self.current_line = items[0].get("line", items[0].get("start_line", 0))
+        self.update()
+        return None
+
+    def _panel_items(self) -> list:
+        if not self.document: return []
+        e = self.history._entry(self.document.filepath)
+        if self._panel_mode == "bookmarks":
+            return sorted(e.get("bookmarks", []), key=lambda x: x.get("line",0))
+        if self._panel_mode == "notes":
+            return sorted(e.get("notes", []), key=lambda x: x.get("line",0))
+        if self._panel_mode == "highlights":
+            return sorted(e.get("highlights", []), key=lambda x: x.get("start_line",0))
+        return []
+
+    def _panel_navigate(self, delta: int):
+        items = self._panel_items()
+        if not items: return
+        self._panel_cursor = max(0, min(len(items)-1, self._panel_cursor + delta))
+        item = items[self._panel_cursor]
+        target = item.get("line", item.get("start_line", 0))
+        self.current_line = max(0, min(len(self.document.lines)-1, target))
+        self.update()
+
+    def _panel_select(self):
+        self._panel_mode = None
+        self.update()
+
+    def _panel_back(self):
+        self._panel_mode = None
+        self.current_line = self._pre_panel_line
+        self.update()
 
     def _paint_statusbar(self, painter):
-        painter.fillRect(QRect(0, 0, self.width(), STATUS_BAR_H),
-                         QColor(self.config.get("statusbar_color") or "#111111"))
-        painter.setPen(QColor("#2a2a2a"))
-        painter.drawLine(0, STATUS_BAR_H-1, self.width(), STATUS_BAR_H-1)
-        painter.setPen(QColor(self.config.get("statusbar_text_color") or "#888888"))
-        painter.setFont(QFont("Courier New", 10))
-        painter.drawText(10, STATUS_BAR_H-8, self.status_text)
+        pass   # replaced by _paint_top_bar / _paint_bottom_bar
 
     def _paint_panel(self, painter):
         self._panel_rects = []
         pw   = max(340, self.width()//2)
         px   = self.width() - pw
-        py   = STATUS_BAR_H
-        ph   = self.height() - STATUS_BAR_H
+        py   = TOP_BAR_H
+        ph   = self.height() - TOP_BAR_H
 
-        painter.fillRect(QRect(px, py, pw, ph), QColor(18, 18, 18, 230))
-        painter.setPen(QColor("#333333"))
+        painter.fillRect(QRect(px, py, pw, ph), QColor(0,0,0,230))
+        painter.setPen(_mk_pen(AMBER_DARK, 2))
         painter.drawLine(px, py, px, self.height())
 
-        painter.setPen(QColor("#999999"))
-        painter.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
+        painter.setPen(AMBER_DIM)
+        painter.setFont(_ui_font(11, bold=True))
         painter.drawText(px+14, py+22, self.panel["title"])
-        painter.setPen(QColor("#2a2a2a"))
+        painter.setPen(_mk_pen(AMBER_VERY_DIM, 2))
         painter.drawLine(px, py+30, self.width(), py+30)
 
         items  = self.panel.get("items", [])
@@ -991,14 +1465,14 @@ class ReaderWidget(QWidget):
         y      = py + 50
         row_h  = 38
 
-        painter.setFont(QFont("Courier New", 10))
+        painter.setFont(_ui_font(10))
         if not items:
-            painter.setPen(QColor("#444444"))
+            painter.setPen(AMBER_DARK)
             painter.drawText(px+14, y+14, "(none)")
         else:
             for item in items:
                 if y + row_h > self.height() - 20:
-                    painter.setPen(QColor("#444444"))
+                    painter.setPen(AMBER_DARK)
                     remaining = len(items) - items.index(item)
                     painter.drawText(px+14, y+14, f"… {remaining} more")
                     break
@@ -1020,33 +1494,33 @@ class ReaderWidget(QWidget):
                 rect = QRect(px, y, pw, row_h)
                 self._panel_rects.append((rect, nav_line))
 
-                painter.setPen(QColor("#888888"))
+                painter.setPen(AMBER_DIM)
                 painter.drawText(px+14, y+14, loc)
                 if body:
                     metrics = painter.fontMetrics()
-                    painter.setPen(QColor("#cccccc"))
+                    painter.setPen(AMBER)
                     painter.drawText(px+14, y+28, metrics.elidedText(body, Qt.TextElideMode.ElideRight, pw-30))
 
                 painter.setPen(QColor("#222222"))
                 painter.drawLine(px+8, y+row_h, self.width()-8, y+row_h)
                 y += row_h
 
-        painter.setPen(QColor("#333333"))
-        painter.setFont(QFont("Courier New", 9))
+        painter.setPen(AMBER_DARK)
+        painter.setFont(_ui_font(9))
         painter.drawText(px+14, self.height()-8, "click to jump  —  Esc to close")
 
     def _paint_confirm(self, painter):
         w, h = 460, 90
         x = (self.width()-w)//2
         y = (self.height()-h)//2
-        painter.fillRect(QRect(x, y, w, h), QColor(20, 20, 20, 245))
-        painter.setPen(QColor("#444444"))
+        painter.fillRect(QRect(x, y, w, h), QColor(0,0,0,245))
+        painter.setPen(AMBER_DARK)
         painter.drawRect(QRect(x, y, w, h))
-        painter.setFont(QFont("Courier New", 11))
-        painter.setPen(QColor("#dddddd"))
+        painter.setFont(_ui_font(11))
+        painter.setPen(AMBER)
         painter.drawText(QRect(x, y, w, h*6//10), Qt.AlignmentFlag.AlignCenter, self._pending["msg"])
-        painter.setPen(QColor("#666666"))
-        painter.setFont(QFont("Courier New", 10))
+        painter.setPen(AMBER_DIM)
+        painter.setFont(_ui_font(10))
         painter.drawText(QRect(x, y+h*6//10, w, h*4//10), Qt.AlignmentFlag.AlignCenter, "[y] confirm  [n / Esc] cancel")
 
     HELP_SECTIONS = [
@@ -1226,11 +1700,11 @@ class ReaderWidget(QWidget):
 
     def _paint_help_panel(self, painter: QPainter):
         pw = self.width()
-        py = STATUS_BAR_H
-        ph = self.height() - STATUS_BAR_H
+        py = TOP_BAR_H
+        ph = self.height() - TOP_BAR_H
 
         # Background
-        painter.fillRect(QRect(0, py, pw, ph), QColor(14, 14, 14, 252))
+        painter.fillRect(QRect(0, py, pw, ph), QColor(0,0,0,252))
 
         # Clip to panel area
         painter.setClipRect(QRect(0, py, pw, ph - 24))
@@ -1241,15 +1715,15 @@ class ReaderWidget(QWidget):
         lh_body  = 19
         lh_head  = 26
 
-        mono     = QFont("Courier New", 10)
-        mono_b   = QFont("Courier New", 10, QFont.Weight.Bold)
-        sans     = QFont("Courier New", 11, QFont.Weight.Bold)
+        mono     = _ui_font(10)
+        mono_b   = _ui_font(10, bold=True)
+        sans     = _ui_font(11, bold=True)
 
         for section, _, rows in self.HELP_SECTIONS:
             # Section header
             y += 8
-            painter.fillRect(QRect(0, y - 2, pw, lh_head), QColor(28, 28, 28))
-            painter.setPen(QColor("#cc8844"))
+            painter.fillRect(QRect(0, y - 2, pw, lh_head), QColor(16,16,16))
+            painter.setPen(AMBER_BRIGHT)
             painter.setFont(sans)
             painter.drawText(margin, y + lh_head - 8, section)
             y += lh_head + 4
@@ -1260,19 +1734,19 @@ class ReaderWidget(QWidget):
 
                 if key == "":
                     # Continuation / descriptive line
-                    painter.setPen(QColor("#777777"))
+                    painter.setPen(AMBER_DIM)
                     painter.setFont(mono)
                     # Word-wrap simple approach: draw in full available width
                     painter.drawText(margin, y + lh_body - 4, val)
                     y += lh_body
                 else:
                     # Key column (left, amber)
-                    painter.setPen(QColor("#ddaa55"))
+                    painter.setPen(AMBER)
                     painter.setFont(mono_b)
                     painter.drawText(margin, y + lh_body - 4, key)
                     if val:
                         # Value column (right, grey)
-                        painter.setPen(QColor("#999999"))
+                        painter.setPen(AMBER_DIM)
                         painter.setFont(mono)
                         painter.drawText(col2_x + margin, y + lh_body - 4, val)
                     y += lh_body
@@ -1282,11 +1756,11 @@ class ReaderWidget(QWidget):
         painter.setClipping(False)
 
         # Footer bar
-        painter.fillRect(QRect(0, self.height()-24, pw, 24), QColor(14, 14, 14))
-        painter.setPen(QColor("#2a2a2a"))
+        painter.fillRect(QRect(0, self.height()-24, pw, 24), UI_BG)
+        painter.setPen(AMBER_VERY_DIM)
         painter.drawLine(0, self.height()-24, pw, self.height()-24)
-        painter.setPen(QColor("#444444"))
-        painter.setFont(QFont("Courier New", 9))
+        painter.setPen(AMBER_DARK)
+        painter.setFont(_ui_font(9))
         painter.drawText(margin, self.height()-8, "↑ ↓  PgUp  PgDn  scroll  —  Esc to close")
 
     # --------------------------------------------------------------- input
@@ -1299,26 +1773,39 @@ class ReaderWidget(QWidget):
             if k == Qt.Key.Key_Y:
                 result = self._pending["action"]()
                 self._pending = None
-                if result: self.status_text = result
                 self.update()
-            elif k in (Qt.Key.Key_N, Qt.Key.Key_Escape):
+            elif k in (Qt.Key.Key_N, Qt.Key.Key_Escape, Qt.Key.Key_Tab):
                 self._pending = None
-                self.status_text = "cancelled"
                 self.update()
             return
 
-        # Panel open
+        # Annotation panel navigation
+        if self._panel_mode:
+            if k in (Qt.Key.Key_Tab, Qt.Key.Key_Escape):
+                self._panel_back()
+            elif k == Qt.Key.Key_Space:
+                self._panel_select()
+            elif k in (Qt.Key.Key_Down, Qt.Key.Key_Right):
+                self._panel_navigate(1)
+            elif k in (Qt.Key.Key_Up, Qt.Key.Key_Left):
+                self._panel_navigate(-1)
+            elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                if time.time() > self._cmd_cooldown:
+                    self._enter_command_mode()
+            return
+
+        # Help/overlay panel
         if self.panel:
-            if k == Qt.Key.Key_Escape:
+            if k in (Qt.Key.Key_Escape, Qt.Key.Key_Tab):
                 self.panel = None; self._panel_scroll = 0; self.update()
             elif k in (Qt.Key.Key_Down, Qt.Key.Key_Space):
                 self._panel_scroll += 40; self.update()
             elif k == Qt.Key.Key_Up:
                 self._panel_scroll = max(0, self._panel_scroll - 40); self.update()
             elif k == Qt.Key.Key_PageDown:
-                self._panel_scroll += self.height() - STATUS_BAR_H - 60; self.update()
+                self._panel_scroll += self.height() - TOP_BAR_H - 60; self.update()
             elif k == Qt.Key.Key_PageUp:
-                self._panel_scroll = max(0, self._panel_scroll - (self.height() - STATUS_BAR_H - 60)); self.update()
+                self._panel_scroll = max(0, self._panel_scroll - (self.height() - TOP_BAR_H - 60)); self.update()
             return
 
         if self.command_mode:
@@ -1330,11 +1817,35 @@ class ReaderWidget(QWidget):
         elif k in (Qt.Key.Key_Up, Qt.Key.Key_Backspace, Qt.Key.Key_Tab): self._step(-1)
         elif k == Qt.Key.Key_PageDown: self._step(self._lines_per_screen())
         elif k == Qt.Key.Key_PageUp:   self._step(-self._lines_per_screen())
+        elif k == Qt.Key.Key_BracketLeft:
+            cur = int(self._cfg("highlight_height") or 20)
+            self.config.set("highlight_height", str(max(4, cur-1)))
+            self.update()
+        elif k == Qt.Key.Key_BracketRight:
+            cur = int(self._cfg("highlight_height") or 20)
+            self.config.set("highlight_height", str(cur+1))
+            self.update()
+        elif k == Qt.Key.Key_Equal:
+            cur = int(self.config.get("ui_border_width") or 2)
+            self.config.set("ui_border_width", str(cur+1))
+            self.update()
+        elif k == Qt.Key.Key_Minus:
+            cur = int(self.config.get("ui_border_width") or 2)
+            self.config.set("ui_border_width", str(max(1, cur-1)))
+            self.update()
+        elif k == Qt.Key.Key_0:
+            # Undo last line movement
+            prev = self._pop_history()
+            if prev is not None and self.document:
+                self.current_line = max(0, min(len(self.document.lines)-1, prev))
+                self.update()
 
     def wheelEvent(self, ev: QWheelEvent):
         delta = ev.angleDelta().y()
         if not delta: return
-        if self.panel:
+        if self._panel_mode:
+            self._panel_navigate(-1 if delta < 0 else 1)
+        elif self.panel:
             self._panel_scroll = max(0, self._panel_scroll - (delta // 3))
             self.update()
         elif not self._pending:
@@ -1348,7 +1859,7 @@ class ReaderWidget(QWidget):
                     self.panel = None
                     self.current_line = max(0, min(len(self.document.lines)-1, line_idx))
                     self.history.set_line(self.document.filepath, self.current_line)
-                    self._update_status(); self.update()
+                    self.update()
                     return
         super().mousePressEvent(ev)
 
@@ -1356,24 +1867,27 @@ class ReaderWidget(QWidget):
 
     def _step(self, delta):
         if not self.document: return
+        self._push_history(self.current_line)
         self.current_line = max(0, min(len(self.document.lines)-1, self.current_line+delta))
         self.history.set_line(self.document.filepath, self.current_line)
-        self._update_status(); self.update()
+        self.update()
 
     def _jump_pages(self, direction):
         if not self.document or not self.document.lines: return
+        self._push_history(self.current_line)
         cp = self.document.lines[self.current_line].page_num
         tp = max(0, min(self.document.page_count-1, cp+direction))
         for i, l in enumerate(self.document.lines):
             if l.page_num == tp: self.current_line = i; break
         self.history.set_line(self.document.filepath, self.current_line)
-        self._update_status(); self.update()
+        self.update()
 
     # ------------------------------------------------------- command mode
 
     def _enter_command_mode(self):
         if time.time() < self._cmd_cooldown:
             return
+        self._cmd_history_idx = -1   # reset browsing position
         self.command_mode = True
         self.cmd.setVisible(True)
         self.cmd.setText(":")
@@ -1389,19 +1903,65 @@ class ReaderWidget(QWidget):
 
     def _execute_command(self):
         raw = self.cmd.text().lstrip(":").strip()
-        self._exit_command_mode()   # always hide first
+        self._exit_command_mode()
         if not raw: return
+        # Save to history (avoid consecutive duplicates)
+        if not self._cmd_history or self._cmd_history[-1] != raw:
+            self._cmd_history.append(raw)
+            if len(self._cmd_history) > 100:
+                self._cmd_history.pop(0)
         result = self._run(raw)
         if result:
-            self.status_text = result; self.update()
+            self.status_text = result
+            self.update()
+            QTimer.singleShot(3000, lambda: self._clear_status())
+
+    def _clear_status(self):
+        self.status_text = ""
+        self.update()
+
+    # Command aliases — short forms expand to full commands before processing
+    CMD_ALIASES = {
+        "bs":   "bookset",
+        "setm": "setmeta",
+        "bi":   "bookinfo",
+        "sc":   "showconfig",
+        "ms":   "ms",
+        "vb":   "vb",
+        "vn":   "vn",
+        "vh":   "vh",
+        "hlh":  "bookset highlight_height",
+        "hla":  "bookset highlight_alpha",
+        "hlo":  "bookset highlight_offset",
+        "hlc":  "bookset indicator_color",
+        "shc":  "bookset saved_highlight_color",
+        "sha":  "bookset saved_highlight_alpha",
+        "bmc":  "bookset bookmark_color",
+        "ntc":  "bookset note_color",
+        "lib":  "lib",
+    }
 
     def _run(self, text: str) -> Optional[str]:
         parsed = parse_shortcut(text)
         if parsed:
             return self._exec_shortcut(parsed)
 
+        # Expand aliases — match on first token or first two tokens
         parts = text.split(None, 2)
         if not parts: return None
+
+        # Check two-token aliases first (e.g. "hlh 20" → "bookset highlight_height 20")
+        two  = " ".join(parts[:2]).lower() if len(parts) >= 2 else ""
+        one  = parts[0].lower()
+        if two in self.CMD_ALIASES:
+            rest = (" " + parts[2]) if len(parts) > 2 else ""
+            text = self.CMD_ALIASES[two] + rest
+            parts = text.split(None, 2)
+        elif one in self.CMD_ALIASES:
+            rest = (" " + " ".join(parts[1:])) if len(parts) > 1 else ""
+            text = self.CMD_ALIASES[one] + rest
+            parts = text.split(None, 2)
+
         cmd = parts[0].lower()
 
         if cmd in ("q","quit","exit"):         QApplication.quit(); return None
@@ -1419,10 +1979,33 @@ class ReaderWidget(QWidget):
         if cmd == "zoom":
             if len(parts) < 2: return f"zoom: {self.zoom_mode}  options: {', '.join(ZOOM_MODES+['cycle'])}"
             return self._do_zoom(parts[1].strip())
-        if cmd in ("sn","shownotes"):        return self._open_panel("Notes",      "notes")
-        if cmd in ("sb","showbookmarks"):    return self._open_panel("Bookmarks",  "bookmarks")
-        if cmd in ("sh","showhighlights"):   return self._open_panel("Highlights", "highlights")
+        if cmd in ("sn","shownotes"):        return self._open_annot_panel("notes")
+        if cmd in ("sb","showbookmarks"):    return self._open_annot_panel("bookmarks")
+        if cmd in ("sh","showhighlights"):   return self._open_annot_panel("highlights")
+        if cmd in ("vn","viewnotes"):        return self._open_annot_panel("notes")
+        if cmd in ("vb","viewbookmarks"):    return self._open_annot_panel("bookmarks")
+        if cmd in ("vh","viewhighlights"):   return self._open_annot_panel("highlights")
+        if cmd in ("ms","swapmargin"):
+            side = "left" if self._margin_side() == "right" else "right"
+            self.config.set("margin_side", side)
+            if self.document: self._rerender()
+            return f"margin: {side}"
         if cmd in ("help","man","?"):        return self._open_panel("ScrollReader — Command Reference", "help")
+
+        # Search commands
+        if cmd in ("sn","sp","sf","sl"):
+            if len(parts) < 2: return "usage: sn/sp/sf/sl <term> or ;;phrase;;"
+            raw = " ".join(parts[1:])
+            m = re.search(r';;(.*?);;', raw)
+            term = m.group(1) if m else raw.strip()
+            result = self._do_search(term, cmd)
+            self._last_command = text
+            return result
+
+        if cmd == "cc":
+            if self._last_command:
+                return self._run(self._last_command)
+            return "no last command"
         if cmd == "set":
             if len(parts) < 3: return "usage: set <key> <value>"
             return self.config.set(parts[1], parts[2])
@@ -1433,7 +2016,7 @@ class ReaderWidget(QWidget):
         if cmd == "bookinfo":
             if not self.document: return "no document open"
             return self.history.summary(self.document.filepath)
-        if cmd == "setmeta":
+        if cmd in ("setmeta", "setm"):
             if len(parts) < 3 or not self.document: return "usage: setmeta <field> <value>"
             return self.history.set_meta(self.document.filepath, parts[1], " ".join(parts[2:]))
         if cmd == "help":
@@ -1464,6 +2047,41 @@ class ReaderWidget(QWidget):
                           "items": self.history._entry(self.document.filepath).get(kind, [])}
         self.update(); return None
 
+    def _do_search(self, term: str, direction: str) -> str:
+        if not self.document or not self.document.lines:
+            return "no document open"
+        try:
+            pattern = re.compile(re.escape(term), re.IGNORECASE)
+        except re.error:
+            return f"invalid search term: {term}"
+
+        self._search_term = term
+        self._search_re   = pattern
+        lines  = self.document.lines
+        total  = len(lines)
+        cur    = self.current_line
+
+        if direction == "sf":   # first
+            indices = range(total)
+        elif direction == "sl": # last
+            indices = range(total-1, -1, -1)
+        elif direction == "sn": # next (forward from cur+1)
+            indices = list(range(cur+1, total)) + list(range(0, cur))
+        elif direction == "sp": # previous (backward from cur-1)
+            indices = list(range(cur-1, -1, -1)) + list(range(total-1, cur, -1))
+        else:
+            indices = range(total)
+
+        for i in indices:
+            if pattern.search(lines[i].text):
+                self._push_history(self.current_line)
+                self.current_line = i
+                self.history.set_line(self.document.filepath, i)
+                self.update()
+                return f"found '{term}' at line {i+1}"
+
+        return f"'{term}' not found"
+
     # ------------------------------------------------- shortcut execution
 
     def _exec_shortcut(self, p: dict) -> Optional[str]:
@@ -1481,14 +2099,14 @@ class ReaderWidget(QWidget):
         if cmd == "goto_line":
             self.current_line = max(0, min(total-1, p["line"]-1))
             self.history.set_line(doc.filepath, self.current_line)
-            self._update_status(); self.update(); return f"line {self.current_line+1}"
+            self.update(); return f"line {self.current_line+1}"
 
         if cmd == "goto_page":
             pg = max(0, min(doc.page_count-1, p["page"]-1))
             for i, l in enumerate(lines):
                 if l.page_num == pg: self.current_line = i; break
             self.history.set_line(doc.filepath, self.current_line)
-            self._update_status(); self.update(); return f"page {pg+1}"
+            self.update(); return f"page {pg+1}"
 
         if cmd == "line_back":    self._step(-p["count"]); return None
         if cmd == "line_forward": self._step(p["count"]);  return None
@@ -1697,23 +2315,19 @@ class ReaderWidget(QWidget):
 # Library Widget
 # ---------------------------------------------------------------------------
 
-LIBRARY_TABS   = ["READING", "UNREAD", "FAVORITES", "ABANDONED", "READ", "SETTINGS"]
+LIBRARY_TABS_ROW1 = ["EDIT META", "SEARCH", "FAVORITES", "SETTINGS"]
+LIBRARY_TABS_ROW2 = ["READING", "READ", "UNREAD", "ABANDONED"]
+LIBRARY_TABS = LIBRARY_TABS_ROW1 + LIBRARY_TABS_ROW2
 TAB_H          = 38
 TAG_BAR_H      = 36
 LIB_STATUS_H   = 24
 
-DEFAULT_SWATCH = [
-    "#c0392b", "#8e44ad", "#2980b9", "#16a085",
-    "#d35400", "#27ae60", "#2c3e50", "#7f8c8d",
-    "#6c3483", "#1a5276",
-]
-
 STATUS_SAT = {
     "reading":   1.0,
-    "unread":    0.7,
+    "unread":    0.65,
     "favorites": 1.0,
-    "abandoned": 0.18,
-    "read":      1.0,
+    "abandoned": 0.15,
+    "read":      0.8,
 }
 
 
@@ -1736,8 +2350,71 @@ def _scan_pdfs(directory: str, recursive: bool = False) -> list[str]:
 
 def _default_lib_dir() -> str:
     if sys.platform.startswith("win"):
-        return str(Path(sys.executable).parent)
+        return str(Path.home() / "Downloads")
     return str(Path.home())
+
+
+def _squarify(books, weights, x, y, w, h, padding, min_w, min_h):
+    """
+    Slice-and-dice treemap. Largest items first, alternating horizontal/vertical splits.
+    Returns [(book, QRect), ...].
+    """
+    if not books or not weights or w <= 0 or h <= 0:
+        return []
+
+    # Sort largest first
+    pairs = sorted(zip(books, weights), key=lambda p: p[1], reverse=True)
+    books_s   = [p[0] for p in pairs]
+    weights_s = [p[1] for p in pairs]
+    total     = sum(weights_s)
+    results   = []
+
+    def _layout(items, wts, rx, ry, rw, rh, depth=0):
+        if not items or rw < min_w or rh < min_h:
+            return
+        if len(items) == 1:
+            results.append((items[0],
+                            QRect(int(rx) + padding, int(ry) + padding,
+                                  max(min_w, int(rw) - padding * 2),
+                                  max(min_h, int(rh) - padding * 2))))
+            return
+
+        wt_total = sum(wts)
+
+        # Split into two halves by weight (binary split)
+        # Find split point closest to 50/50
+        cumulative = 0
+        split_idx  = 1
+        best_diff  = float('inf')
+        for i in range(1, len(wts)):
+            cumulative += wts[i-1]
+            diff = abs(cumulative / wt_total - 0.5)
+            if diff < best_diff:
+                best_diff = diff
+                split_idx = i
+
+        frac_a = sum(wts[:split_idx]) / wt_total
+        frac_b = 1.0 - frac_a
+
+        # Choose split direction: split along the long axis
+        if rw >= rh:
+            # Split horizontally
+            wa = max(min_w, int(rw * frac_a))
+            wb = max(min_w, int(rw * frac_b))
+            # Adjust to fill exactly
+            wb = max(min_w, rw - wa)
+            _layout(items[:split_idx], wts[:split_idx], rx, ry, wa, rh, depth+1)
+            _layout(items[split_idx:], wts[split_idx:], rx+wa, ry, wb, rh, depth+1)
+        else:
+            # Split vertically
+            ha = max(min_h, int(rh * frac_a))
+            hb = max(min_h, int(rh * frac_b))
+            hb = max(min_h, rh - ha)
+            _layout(items[:split_idx], wts[:split_idx], rx, ry, rw, ha, depth+1)
+            _layout(items[split_idx:], wts[split_idx:], rx, ry+ha, rw, hb, depth+1)
+
+    _layout(books_s, weights_s, x, y, w, h)
+    return results
 
 
 class LibraryWidget(QWidget):
@@ -1753,16 +2430,17 @@ class LibraryWidget(QWidget):
         self.config  = config
         self.history = history
         self.tab     = "READING"
-        self.scroll  = 0
         self.active_tag: Optional[str] = None
-        self._book_rects: list         = []  # [(QRect, filepath)]
-        self._tab_rects:  list         = []  # [(QRect, tab_name)]
-        self._tag_rects:  list         = []  # [(QRect, tag)]
+        self._book_rects: list         = []  # [(QRect, filepath_or_None)]
+        self._tab_rects:  list         = []
+        self._tag_rects:  list         = []
+        self._overflow_rect: Optional[QRect] = None  # the +N more cell
+        self._cursor_idx: int          = 0   # keyboard nav index into _book_rects
+        self._overflow_stack: list     = []  # stack of book lists for drill-down
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet("background: transparent;")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        # Command bar (shared style with ReaderWidget)
         self._cmd_mode    = False
         self._cmd_cooldown = 0.0
         self.cmd = QLineEdit(self)
@@ -1770,11 +2448,11 @@ class LibraryWidget(QWidget):
         self.cmd.installEventFilter(self)
         self.cmd.setStyleSheet("""
             QLineEdit {
-                background-color: #1e1e1e; color: #e0e0e0;
-                border: none; border-top: 1px solid #333;
+                background-color: #000000; color: #ffbb33;
+                border: none; border-top: 1px solid #553300;
                 padding: 3px 10px;
-                font-family: "Courier New", monospace; font-size: 13px;
-                selection-background-color: #444;
+                font-family: "IBM VGA 8x16", "Courier New", monospace; font-size: 13px;
+                selection-background-color: #ffbb33; selection-color: #000000;
             }
         """)
         self.status_msg = ""
@@ -1784,7 +2462,8 @@ class LibraryWidget(QWidget):
         super().resizeEvent(ev)
 
     def showEvent(self, ev):
-        self.scroll = 0
+        self._overflow_stack = []
+        self._cursor_idx     = 0
         self._refresh_books()
         self.setFocus()
         super().showEvent(ev)
@@ -1792,13 +2471,24 @@ class LibraryWidget(QWidget):
     # ---------------------------------------------------------------- data
 
     def _refresh_books(self):
-        """Scan library dir and merge with history."""
+        """Scan library dir and merge with history, peeking page counts for new PDFs."""
         lib_dir   = self.config.get("library_dir") or _default_lib_dir()
         recursive = bool(self.config.get("library_recursive") or False)
         found     = _scan_pdfs(lib_dir, recursive)
-        # Ensure scanned files exist in history
+        changed   = False
         for fp in found:
-            self.history._entry(fp)  # creates default entry if missing
+            e = self.history._entry(fp)
+            if not e.get("total_pages"):
+                try:
+                    doc = fitz.open(fp)
+                    n   = len(doc)
+                    doc.close()
+                    e["total_pages"] = n
+                    changed = True
+                except Exception:
+                    e["total_pages"] = 1
+        if changed:
+            self.history._save()
 
     def _all_books(self) -> list[dict]:
         """Return list of enriched book dicts from history."""
@@ -1824,7 +2514,8 @@ class LibraryWidget(QWidget):
                 "tags":      e.get("tags") or [],
                 "favorite":  bool(e.get("favorite")),
                 "line":      e.get("line") or 0,
-                "total":     e.get("total_lines") or 1,
+                "total":     e.get("total_lines") or (e.get("total_pages") or 1) * 40,
+                "total_pages": e.get("total_pages") or 1,
                 "notes":     len(e.get("notes", [])),
                 "bookmarks": len(e.get("bookmarks", [])),
                 "highlights":len(e.get("highlights", [])),
@@ -1872,7 +2563,7 @@ class LibraryWidget(QWidget):
 
         # Main panel background
         panel_y = 0
-        painter.fillRect(0, panel_y, w, h, QColor(18, 18, 18, 240))
+        painter.fillRect(0, panel_y, w, h, QColor(0,0,0,240))
 
         # Tabs
         self._tab_rects = []
@@ -1884,6 +2575,12 @@ class LibraryWidget(QWidget):
 
         if self.tab == "SETTINGS":
             self._paint_settings(painter, 0, content_y, w, content_h)
+        elif self.tab in ("EDIT META", "SEARCH"):
+            painter.setPen(AMBER_DARK)
+            painter.setFont(_ui_font(13))
+            painter.drawText(QRect(0, content_y, w, content_h),
+                             Qt.AlignmentFlag.AlignCenter,
+                             f"{self.tab}\n\n(coming soon)")
         elif self.tab == "READ":
             self._paint_read_tab(painter, 0, content_y, w, content_h)
         else:
@@ -1898,127 +2595,231 @@ class LibraryWidget(QWidget):
         self._paint_lib_status(painter, 0, stat_y, w)
 
     def _paint_tabs(self, painter: QPainter, w: int):
-        tabs_per_row = 3
-        tw = w // tabs_per_row
-        mono_b = QFont("Courier New", 10, QFont.Weight.Bold)
-        painter.setFont(mono_b)
+        tw   = w // 4
+        font_b = _ui_font(9, bold=True)
+        painter.setFont(font_b)
 
-        for i, tab in enumerate(LIBRARY_TABS):
-            row = i // tabs_per_row
-            col = i  % tabs_per_row
-            x   = col * tw
-            y   = row * TAB_H
+        all_tabs = LIBRARY_TABS_ROW1 + LIBRARY_TABS_ROW2
+        for i, tab in enumerate(all_tabs):
+            row = 0 if tab in LIBRARY_TABS_ROW1 else 1
+            col = (LIBRARY_TABS_ROW1.index(tab) if row == 0
+                   else LIBRARY_TABS_ROW2.index(tab))
+            x    = col * tw
+            y    = row * TAB_H
             rect = QRect(x, y, tw - 2, TAB_H - 2)
             self._tab_rects.append((rect, tab))
 
             active = tab == self.tab
-            bg = QColor("#2a5a8a") if active else QColor("#1a2a3a")
-            painter.fillRect(rect, bg)
-            painter.setPen(QColor("#88ccff") if active else QColor("#446688"))
+            painter.fillRect(rect, AMBER_INV_BG if active else UI_BG)
+            painter.setPen(AMBER_BRIGHT if active else AMBER_DARK)
             painter.drawRect(rect)
-            painter.setPen(QColor("#ffffff") if active else QColor("#88aacc"))
+            painter.setPen(AMBER_INV_FG if active else AMBER_DIM)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, tab)
 
+    def _current_books(self) -> list[dict]:
+        """Return books for current tab/tag/overflow level."""
+        if self._overflow_stack:
+            return self._overflow_stack[-1]
+        return self._books_for_tab(self.tab)
+
     def _paint_blocks(self, painter: QPainter, x: int, y: int, w: int, h: int):
-        self._book_rects = []
-        books = self._books_for_tab(self.tab)
+        self._book_rects    = []
+        self._overflow_rect = None
+        books = self._current_books()
+
         if not books:
-            painter.setPen(QColor("#444444"))
-            painter.setFont(QFont("Courier New", 13))
+            painter.setPen(AMBER_DARK)
+            painter.setFont(_ui_font(13))
             painter.drawText(QRect(x, y, w, h), Qt.AlignmentFlag.AlignCenter,
                              f"No books in {self.tab.lower()}")
             return
 
-        sat = STATUS_SAT.get(self.tab.lower(), 1.0)
-        total_lines = sum(max(b["total"] - b["line"], 1) for b in books)
-        usable_h    = h - 8
-        min_h       = 80
-        padding     = 6
+        sat      = STATUS_SAT.get(self.tab.lower(), 1.0)
+        padding  = 4
+        MIN_W    = 100
+        MIN_H    = 60
+        MIN_AREA = MIN_W * MIN_H
+        VP_W     = w - padding * 2
+        VP_H     = h - padding * 2
+        VP_AREA  = VP_W * VP_H
 
-        # Treemap-ish: pack into rows
-        # Simple proportional layout: each book gets width proportional to remaining lines
-        # Pack left-to-right, wrap into rows
-        row_items: list[list] = []
-        row: list = []
-        row_lines = 0
-        for b in books:
-            remaining = max(b["total"] - b["line"], 1)
-            row.append((b, remaining))
-            row_lines += remaining
-            frac = row_lines / max(total_lines, 1)
-            if frac >= 0.25 or b is books[-1]:
-                row_items.append((row[:], row_lines))
-                row = []; row_lines = 0
+        def _unread(b):
+            tp = max(b["total_pages"], 1)
+            return max(1, tp - round(b["line"] / max(b["total"], 1) * tp))
 
-        # Distribute rows evenly across available height
-        n_rows   = max(len(row_items), 1)
-        row_h    = max(min_h, (usable_h - padding * (n_rows + 1)) // n_rows)
-        cur_y    = y + padding - self.scroll
+        unread      = [_unread(b) for b in books]
+        # Use fourth-root scaling for more pronounced size variation
+        scaled      = [max(1, u ** 0.25) for u in unread]
+        total_s     = max(sum(scaled), 1)
 
-        mono     = QFont("Courier New", 9)
-        mono_b   = QFont("Courier New", 9, QFont.Weight.Bold)
+        # Normalize: each book's area proportional to scaled unread pages
+        norm_areas  = [(s / total_s) * VP_AREA for s in scaled]
 
-        for row, row_lines in row_items:
-            cur_x = x + padding
-            for b, remaining in row:
-                frac   = remaining / max(row_lines, 1)
-                bw     = max(120, int((w - padding * (len(row) + 1)) * frac))
-                bh     = row_h
-                rect   = QRect(cur_x, cur_y, bw, bh)
+        # Split into visible (area >= MIN_AREA) and overflow
+        visible     = [(b, a) for b, a in zip(books, norm_areas) if a >= MIN_AREA]
+        ov_books    = [b for b, a in zip(books, norm_areas) if a < MIN_AREA]
+        ov_area     = sum(a for b, a in zip(books, norm_areas) if a < MIN_AREA)
 
-                if cur_y + bh > y and cur_y < y + h:
-                    color = _adjust_sat(b["color"], sat)
-                    dark  = QColor(0, 0, 0, 120)
+        if not visible and ov_books:
+            # Everything too small — show them all at min anyway
+            visible  = [(b, MIN_AREA) for b in books]
+            ov_books = []
+            ov_area  = 0
 
-                    # Block background
+        # Build layout list: visible books + overflow cell (if needed)
+        if ov_books:
+            OVFL = {"_overflow": True}
+            layout_books = [b for b, _ in visible] + [OVFL]
+            layout_areas = [a for _, a in visible] + [max(MIN_AREA, ov_area)]
+        else:
+            layout_books = [b for b, _ in visible]
+            layout_areas = [a for _, a in visible]
+
+        # Single squarify pass — overflow cell participates naturally
+        all_rects = _squarify(layout_books, layout_areas,
+                               x + padding, y + padding,
+                               VP_W, VP_H, padding, MIN_W, MIN_H)
+
+        # all_rects IS visible_pairs — rename for clarity
+        visible_pairs = all_rects
+
+        mono   = _ui_font(9)
+        mono_b = _ui_font(9, bold=True)
+
+        for idx, (b, rect) in enumerate(visible_pairs):
+            is_overflow = b.get("_overflow", False) if isinstance(b, dict) else False
+            selected    = (idx == self._cursor_idx) and not self._cmd_mode
+
+            if is_overflow:
+                # Draw overflow cell
+                painter.fillRect(rect, AMBER_INV_BG if selected else UI_BG)
+                xfg = AMBER_INV_FG if selected else AMBER_DIM
+                painter.setFont(_ui_font(9))
+                painter.setPen(xfg)
+                fm = QFontMetrics(_ui_font(9))
+                cw = max(fm.horizontalAdvance("X"), 1)
+                ch = 14
+                for row in range(rect.top()+4, rect.bottom()-18, ch):
+                    for col in range(rect.left()+4, rect.right()-4, cw):
+                        painter.drawText(col, row+ch-2, "X")
+                label = f"+{len(ov_books)} more"
+                painter.fillRect(QRect(rect.left(), rect.bottom()-18, rect.width(), 18), UI_BG)
+                painter.setPen(AMBER_BRIGHT if selected else AMBER)
+                painter.setFont(_ui_font(9, bold=True))
+                painter.drawText(QRect(rect.left(), rect.bottom()-18, rect.width(), 18),
+                                 Qt.AlignmentFlag.AlignCenter, label)
+                painter.setPen(AMBER_BRIGHT if selected else AMBER_DARK)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(rect)
+                self._book_rects.append((rect, None))
+                self._overflow_rect = rect
+            else:
+                # Draw book cell
+                color = _adjust_sat(b["color"], sat)
+                if selected:
+                    painter.fillRect(rect, AMBER_INV_BG)
+                    text_primary = AMBER_INV_FG
+                    text_dim     = QColor(60, 40, 0)
+                    text_darker  = QColor(80, 60, 0)
+                else:
                     painter.fillRect(rect, color)
-                    painter.fillRect(rect, dark)
+                    painter.fillRect(rect, QColor(0, 0, 0, 120))
+                    text_primary = AMBER_BRIGHT
+                    text_dim     = AMBER_DIM
+                    text_darker  = AMBER_DARK
 
-                    # Left accent bar
-                    accent = _adjust_sat(b["color"], min(sat * 1.3, 1.0))
-                    painter.fillRect(QRect(cur_x, cur_y, 4, bh), accent)
+                accent = AMBER_INV_FG if selected else _adjust_sat(b["color"], min(sat*1.3, 1.0))
+                painter.fillRect(QRect(rect.x(), rect.y(), 4, rect.height()), accent)
+                painter.setPen(AMBER_BRIGHT if selected else QColor(255, 255, 255, 20))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(rect)
 
-                    # Favorite star
-                    if b["favorite"]:
-                        painter.setPen(QColor("#ffdd00"))
-                        painter.setFont(QFont("Courier New", 10))
-                        painter.drawText(QRect(cur_x + bw - 20, cur_y + 4, 16, 16),
-                                         Qt.AlignmentFlag.AlignCenter, "★")
+                if b["favorite"]:
+                    painter.setPen(AMBER_BRIGHT if not selected else AMBER_INV_FG)
+                    painter.setFont(_ui_font(10))
+                    painter.drawText(QRect(rect.x()+rect.width()-20, rect.y()+4, 16, 16),
+                                     Qt.AlignmentFlag.AlignCenter, "★")
 
-                    # Text content
-                    fm    = QFontMetrics(mono_b)
-                    inner = QRect(cur_x + 10, cur_y + 8, bw - 20, bh - 16)
-                    line_h = 16
+                inner  = QRect(rect.x()+10, rect.y()+8, rect.width()-20, rect.height()-16)
+                line_h = 16
+                metar  = f"N{b['notes']}B{b['bookmarks']}H{b['highlights']}R{int(b['line']/max(b['total'],1)*100)}P{b['total_pages']}"
+                txt_col = AMBER_INV_FG if selected else AMBER_BRIGHT
+                texts  = [
+                    (metar,       mono,   txt_col),
+                    (b["title"],  mono_b, txt_col),
+                    (b["author"], mono,   txt_col),
+                ]
+                ty = inner.top()
+                for txt, font, col in texts:
+                    if ty + line_h > inner.bottom(): break
+                    painter.setFont(font); painter.setPen(col)
+                    painter.drawText(rect.x()+10, ty+line_h-2,
+                        QFontMetrics(font).elidedText(
+                            txt, Qt.TextElideMode.ElideRight, inner.width()))
+                    ty += line_h
 
-                    progress = b["line"] / max(b["total"], 1)
-                    pct_str  = f"{int(progress*100)}%"
-                    metar    = f"N{b['notes']}B{b['bookmarks']}H{b['highlights']}"
+                self._book_rects.append((rect, b["filepath"]))
 
-                    lines_text = [
-                        (b["title"],  mono_b, QColor("#ffffff")),
-                        (b["author"], mono,   QColor("#aaaaaa")),
-                        (f"PROG {pct_str}", mono, QColor("#88ccaa")),
-                        (metar,       mono,   QColor("#8899aa")),
-                    ]
+        # Clamp cursor
+        if self._cursor_idx >= len(self._book_rects):
+            self._cursor_idx = max(0, len(self._book_rects) - 1)
 
-                    ty = inner.top()
-                    for txt, font, col in lines_text:
-                        if ty + line_h > inner.bottom(): break
-                        painter.setFont(font)
-                        painter.setPen(col)
-                        elided = QFontMetrics(font).elidedText(
-                            txt, Qt.TextElideMode.ElideRight, inner.width())
-                        painter.drawText(cur_x + 10, ty + line_h - 2, elided)
-                        ty += line_h
+        mono   = _ui_font(9)
+        mono_b = _ui_font(9, bold=True)
 
-                    # Border
-                    painter.setPen(QColor(255, 255, 255, 25))
-                    painter.drawRect(rect)
+        for idx, (b, rect) in enumerate(visible_pairs):
+            selected = (idx == self._cursor_idx) and not self._cmd_mode
 
-                    self._book_rects.append((rect, b["filepath"]))
+            color = _adjust_sat(b["color"], sat)
+            if selected:
+                painter.fillRect(rect, AMBER_INV_BG)
+                text_primary = AMBER_INV_FG
+                text_dim     = QColor(60, 40, 0)
+                text_darker  = QColor(80, 60, 0)
+            else:
+                painter.fillRect(rect, color)
+                painter.fillRect(rect, QColor(0, 0, 0, 120))
+                text_primary = AMBER_BRIGHT
+                text_dim     = AMBER_DIM
+                text_darker  = AMBER_DARK
 
-                cur_x += bw + padding
-            cur_y += row_h + padding
+            accent = AMBER_INV_FG if selected else _adjust_sat(b["color"], min(sat*1.3, 1.0))
+            painter.fillRect(QRect(rect.x(), rect.y(), 4, rect.height()), accent)
+
+            painter.setPen(AMBER_BRIGHT if selected else QColor(255, 255, 255, 20))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect)
+
+            if b["favorite"]:
+                painter.setPen(AMBER_BRIGHT if not selected else AMBER_INV_FG)
+                painter.setFont(_ui_font(10))
+                painter.drawText(QRect(rect.x()+rect.width()-20, rect.y()+4, 16, 16),
+                                 Qt.AlignmentFlag.AlignCenter, "★")
+
+            inner  = QRect(rect.x()+10, rect.y()+8, rect.width()-20, rect.height()-16)
+            line_h = 16
+            metar  = f"N{b['notes']}B{b['bookmarks']}H{b['highlights']}R{int(b['line']/max(b['total'],1)*100)}P{b['total_pages']}"
+            # All text same color within a box for readability
+            txt_col = AMBER_INV_FG if selected else AMBER_BRIGHT
+            texts  = [
+                (metar,       mono,   txt_col),
+                (b["title"],  mono_b, txt_col),
+                (b["author"], mono,   txt_col),
+            ]
+            ty = inner.top()
+            for txt, font, col in texts:
+                if ty + line_h > inner.bottom(): break
+                painter.setFont(font); painter.setPen(col)
+                painter.drawText(rect.x()+10, ty+line_h-2,
+                    QFontMetrics(font).elidedText(
+                        txt, Qt.TextElideMode.ElideRight, inner.width()))
+                ty += line_h
+
+            self._book_rects.append((rect, b["filepath"]))
+
+        # Clamp cursor
+        if self._cursor_idx >= len(self._book_rects):
+            self._cursor_idx = max(0, len(self._book_rects) - 1)
 
     def _paint_read_tab(self, painter: QPainter, x: int, y: int, w: int, h: int):
         self._book_rects = []
@@ -2026,17 +2827,17 @@ class LibraryWidget(QWidget):
         use_size = self.config.get("read_tab_sizing") == "lines"
 
         if not books:
-            painter.setPen(QColor("#444444"))
-            painter.setFont(QFont("Courier New", 13))
+            painter.setPen(AMBER_DARK)
+            painter.setFont(_ui_font(13))
             painter.drawText(QRect(x, y, w, h), Qt.AlignmentFlag.AlignCenter,
                              "No finished books yet")
             return
 
-        mono   = QFont("Courier New", 9)
-        mono_b = QFont("Courier New", 9, QFont.Weight.Bold)
+        mono   = _ui_font(9)
+        mono_b = _ui_font(9, bold=True)
         bar_h  = 28
         pad    = 3
-        cur_y  = y + pad - self.scroll
+        cur_y  = y + pad
 
         if use_size:
             # Variable height by total line count
@@ -2058,20 +2859,20 @@ class LibraryWidget(QWidget):
     def _paint_read_bar(self, painter, rect, b, mono, mono_b, full=False):
         color = _adjust_sat(b["color"], 0.6)
         dark  = QColor(0, 0, 0, 140)
-        painter.fillRect(rect, QColor(28, 28, 28))
+        painter.fillRect(rect, QColor(16,16,16))
         painter.fillRect(QRect(rect.x(), rect.y(), 4, rect.height()), color)
 
         if full:
             painter.fillRect(rect, dark)
 
-        metar = f"N{b['notes']}B{b['bookmarks']}H{b['highlights']}"
+        metar = f"N{b['notes']}B{b['bookmarks']}H{b['highlights']}P{b['total_pages']}"
         stars = "★" * (b["rating"] or 0) + "☆" * (5 - (b["rating"] or 0))
 
-        painter.setPen(QColor("#ffffff"))
+        painter.setPen(AMBER_BRIGHT)
         painter.setFont(mono_b)
         painter.drawText(rect.x() + 12, rect.y() + 18, b["title"][:40])
 
-        painter.setPen(QColor("#888888"))
+        painter.setPen(AMBER_DIM)
         painter.setFont(mono)
         mid_x = rect.x() + rect.width() // 3
         painter.drawText(mid_x, rect.y() + 18, b["author"][:30])
@@ -2079,16 +2880,16 @@ class LibraryWidget(QWidget):
         right_x = rect.x() + rect.width() - 220
         painter.drawText(right_x, rect.y() + 18, metar)
 
-        painter.setPen(QColor("#ffdd00"))
+        painter.setPen(AMBER_BRIGHT)
         painter.drawText(rect.x() + rect.width() - 90, rect.y() + 18, stars)
 
         painter.setPen(QColor(255, 255, 255, 20))
         painter.drawRect(rect)
 
     def _paint_settings(self, painter: QPainter, x: int, y: int, w: int, h: int):
-        mono   = QFont("Courier New", 10)
-        mono_b = QFont("Courier New", 10, QFont.Weight.Bold)
-        head   = QFont("Courier New", 10, QFont.Weight.Bold)
+        mono   = _ui_font(10)
+        mono_b = _ui_font(10, bold=True)
+        head   = _ui_font(10, bold=True)
 
         settings_ref = [
             ("LIBRARY", [
@@ -2135,7 +2936,7 @@ class LibraryWidget(QWidget):
             ]),
         ]
 
-        cur_y   = y + 12 - self.scroll
+        cur_y   = y + 12
         lh_head = 26
         lh_row  = 20
         col2    = 200
@@ -2147,8 +2948,8 @@ class LibraryWidget(QWidget):
             if cur_y > y + h: break
 
             # Section header
-            painter.fillRect(QRect(x, cur_y, w, lh_head), QColor(28, 35, 45))
-            painter.setPen(QColor("#cc8844"))
+            painter.fillRect(QRect(x, cur_y, w, lh_head), QColor(10,8,0))
+            painter.setPen(AMBER_BRIGHT)
             painter.setFont(head)
             painter.drawText(x + 16, cur_y + lh_head - 6, section)
             cur_y += lh_head + 2
@@ -2157,20 +2958,20 @@ class LibraryWidget(QWidget):
             for key, val, cmd, desc in rows:
                 if cur_y + lh_row > y + h: break
                 # Key
-                painter.setPen(QColor("#ddaa55"))
+                painter.setPen(AMBER)
                 painter.setFont(mono_b)
                 painter.drawText(x + 16, cur_y + lh_row - 5, key)
                 # Value
-                painter.setPen(QColor("#88ddaa"))
+                painter.setPen(AMBER_DIM)
                 painter.setFont(mono)
                 elided_val = QFontMetrics(mono).elidedText(
                     str(val), Qt.TextElideMode.ElideRight, col3 - col2 - 10)
                 painter.drawText(x + col2, cur_y + lh_row - 5, elided_val)
                 # Command
-                painter.setPen(QColor("#666688"))
+                painter.setPen(AMBER_DIM)
                 painter.drawText(x + col3, cur_y + lh_row - 5, cmd)
                 # Description
-                painter.setPen(QColor("#556655"))
+                painter.setPen(AMBER_VERY_DIM)
                 painter.drawText(x + col4, cur_y + lh_row - 5, desc)
                 cur_y += lh_row
 
@@ -2180,12 +2981,12 @@ class LibraryWidget(QWidget):
 
     def _paint_tag_bar(self, painter: QPainter, x: int, y: int, w: int):
         self._tag_rects = []
-        painter.fillRect(QRect(x, y, w, TAG_BAR_H), QColor(14, 14, 14))
-        painter.setPen(QColor("#2a2a2a"))
+        painter.fillRect(QRect(x, y, w, TAG_BAR_H), UI_BG)
+        painter.setPen(AMBER_VERY_DIM)
         painter.drawLine(x, y, x + w, y)
 
         tags   = self._all_tags()
-        mono_b = QFont("Courier New", 9, QFont.Weight.Bold)
+        mono_b = _ui_font(9, bold=True)
         painter.setFont(mono_b)
         cx = x + 10
         ty = y + TAG_BAR_H // 2 + 5
@@ -2206,26 +3007,30 @@ class LibraryWidget(QWidget):
             cx += pill_w + 8
 
     def _draw_tag_pill(self, painter, x, y, text, active, color_hex):
-        mono_b = QFont("Courier New", 9, QFont.Weight.Bold)
+        mono_b = _ui_font(9, bold=True)
         fm     = QFontMetrics(mono_b)
         pw     = fm.horizontalAdvance(text) + 20
         ph     = TAG_BAR_H - 8
-        bg     = QColor(color_hex) if active else QColor(30, 30, 30)
+        bg     = QColor(color_hex) if active else UI_BG
         painter.fillRect(QRect(x, y, pw, ph), bg)
-        painter.setPen(QColor("#aaccaa") if active else QColor("#446644"))
+        painter.setPen(AMBER if active else AMBER_DARK)
         painter.drawRect(QRect(x, y, pw, ph))
-        painter.setPen(QColor("#ffffff") if active else QColor("#778877"))
+        painter.setPen(AMBER_BRIGHT if active else AMBER_DARK)
         painter.setFont(mono_b)
         painter.drawText(QRect(x, y, pw, ph), Qt.AlignmentFlag.AlignCenter, text)
 
     def _paint_lib_status(self, painter: QPainter, x: int, y: int, w: int):
-        painter.fillRect(QRect(x, y, w, LIB_STATUS_H), QColor(14, 14, 14))
-        painter.setPen(QColor("#2a2a2a"))
+        painter.fillRect(QRect(x, y, w, LIB_STATUS_H), UI_BG)
+        painter.setPen(AMBER_VERY_DIM)
         painter.drawLine(x, y, x + w, y)
-        painter.setPen(QColor("#446644"))
-        painter.setFont(QFont("Courier New", 9))
-        books = self._books_for_tab(self.tab)
-        msg   = self.status_msg or (f"{len(books)} book(s)  —  Enter: command mode  —  Esc: close library  —  click to open")
+        painter.setPen(AMBER_DARK)
+        painter.setFont(_ui_font(9))
+        books = self._current_books()
+        depth = f"  [+{len(self._overflow_stack)} levels deep]" if self._overflow_stack else ""
+        msg   = self.status_msg or (
+            f"{len(books)} book(s){depth}"
+            f"  —  ↑↓←→ navigate  Space: open  Tab/Esc: back  Enter: command"
+        )
         painter.drawText(x + 12, y + LIB_STATUS_H - 6, msg)
 
     # --------------------------------------------------------------- input
@@ -2242,6 +3047,88 @@ class LibraryWidget(QWidget):
                 return True
         return super().eventFilter(obj, event)
 
+    def _select_current(self):
+        if not self._book_rects: return
+        idx = self._cursor_idx
+        if idx >= len(self._book_rects): return
+        _, fp = self._book_rects[idx]
+
+        if fp is None:
+            # Overflow cell — drill down using normalized areas
+            books = self._current_books()
+            vp_area = self.width() * self.height()
+            def _u(b):
+                tp = max(b["total_pages"], 1)
+                return max(1, tp - round(b["line"] / max(b["total"], 1) * tp))
+            unread  = [_u(b) for b in books]
+            total_u = max(sum(unread), 1)
+            norm    = [(u / total_u) * vp_area for u in unread]
+            MIN_AREA = 100 * 60
+            overflow = [b for b, a in zip(books, norm) if a < MIN_AREA]
+            if overflow:
+                self._overflow_stack.append(overflow)
+                self._cursor_idx = 0
+                self.update()
+        else:
+            self.hide()
+            self.open_book.emit(fp)
+
+    def _go_back(self):
+        """Go back one overflow level, or close if at top."""
+        if self._overflow_stack:
+            self._overflow_stack.pop()
+            self._cursor_idx = 0
+            self.update()
+        else:
+            self.hide()
+
+    def _move_cursor(self, dx: int, dy: int):
+        """Move cursor by direction in the current grid."""
+        n = len(self._book_rects)
+        if n == 0: return
+
+        cur = self._cursor_idx
+        if cur >= n: cur = 0
+
+        # Build a simple grid position from rect centers
+        rects = [r for r, _ in self._book_rects]
+        cx, cy = rects[cur].center().x(), rects[cur].center().y()
+
+        best_idx  = cur
+        best_dist = float('inf')
+
+        for i, r in enumerate(rects):
+            if i == cur: continue
+            rx, ry = r.center().x(), r.center().y()
+            ddx, ddy = rx - cx, ry - cy
+
+            # Must be in roughly the right direction
+            if dx != 0 and (dx > 0) != (ddx > 0): continue
+            if dy != 0 and (dy > 0) != (ddy > 0): continue
+            if dx == 0 and abs(ddx) > abs(ddy) * 2: continue
+            if dy == 0 and abs(ddy) > abs(ddx) * 2: continue
+
+            dist = ddx*ddx + ddy*ddy
+            if dist < best_dist:
+                best_dist = dist
+                best_idx  = i
+
+        self._cursor_idx = best_idx
+        self.update()
+
+    def _cycle_tab(self, direction: int):
+        """Cycle through tabs without needing to press enter."""
+        all_tabs = LIBRARY_TABS_ROW1 + LIBRARY_TABS_ROW2
+        if self.tab not in all_tabs:
+            self.tab = all_tabs[0]
+        else:
+            idx = all_tabs.index(self.tab)
+            self.tab = all_tabs[(idx + direction) % len(all_tabs)]
+        self._overflow_stack = []
+        self._cursor_idx     = 0
+        self.status_msg      = ""
+        self._refresh_books()
+        self.update()
     def keyPressEvent(self, ev: QKeyEvent):
         k = ev.key()
 
@@ -2251,39 +3138,52 @@ class LibraryWidget(QWidget):
             return
 
         if k == Qt.Key.Key_Escape:
-            self.hide()
-            return
+            self._go_back(); return
 
         if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if time.time() > self._cmd_cooldown:
                 self._enter_command_mode()
             return
 
+        if k == Qt.Key.Key_Space:
+            self._select_current(); return
+        if k in (Qt.Key.Key_Tab, Qt.Key.Key_Backspace):
+            self._go_back(); return
+        # Left/right cycle tabs
+        if k == Qt.Key.Key_Left:
+            self._cycle_tab(-1); return
+        if k == Qt.Key.Key_Right:
+            self._cycle_tab(1); return
+        # Up/down move block cursor
         if k == Qt.Key.Key_Down:
-            self.scroll += 40; self.update()
-        elif k == Qt.Key.Key_Up:
-            self.scroll = max(0, self.scroll - 40); self.update()
-        elif k == Qt.Key.Key_PageDown:
-            self.scroll += self.height() - 160; self.update()
-        elif k == Qt.Key.Key_PageUp:
-            self.scroll = max(0, self.scroll - (self.height() - 160)); self.update()
+            n = len(self._book_rects)
+            if n: self._cursor_idx = min(n-1, self._cursor_idx+1)
+            self.update(); return
+        if k == Qt.Key.Key_Up:
+            if self._book_rects: self._cursor_idx = max(0, self._cursor_idx-1)
+            self.update(); return
 
     def wheelEvent(self, ev: QWheelEvent):
         delta = ev.angleDelta().y()
-        if delta:
-            self.scroll = max(0, self.scroll - delta // 3)
-            self.update()
+        n = len(self._book_rects)
+        if n == 0 or not delta: return
+        if delta < 0:
+            self._cursor_idx = min(n-1, self._cursor_idx+1)
+        else:
+            self._cursor_idx = max(0, self._cursor_idx-1)
+        self.update()
 
     def mousePressEvent(self, ev: QMouseEvent):
         if ev.button() != Qt.MouseButton.LeftButton:
             return
         pos = ev.pos()
 
-        # Tab clicks
+        # Tab clicks — switch tab immediately
         for rect, tab in self._tab_rects:
             if rect.contains(pos):
-                self.tab    = tab
-                self.scroll = 0
+                self.tab = tab
+                self._overflow_stack = []
+                self._cursor_idx = 0
                 self.status_msg = ""
                 self._refresh_books()
                 self.update()
@@ -2292,16 +3192,22 @@ class LibraryWidget(QWidget):
         # Tag clicks
         for rect, tag in self._tag_rects:
             if rect.contains(pos):
-                self.active_tag = tag  # None = ALL
-                self.scroll = 0
+                self.active_tag = tag
+                self._overflow_stack = []
+                self._cursor_idx = 0
                 self.update()
                 return
 
-        # Book clicks
-        for rect, fp in self._book_rects:
+        # Book clicks — first click selects, second click (or double-click) opens
+        for i, (rect, fp) in enumerate(self._book_rects):
             if rect.contains(pos):
-                self.hide()
-                self.open_book.emit(fp)
+                if self._cursor_idx == i:
+                    # Already selected — open it
+                    self._select_current()
+                else:
+                    # First click — just move cursor
+                    self._cursor_idx = i
+                    self.update()
                 return
 
     # ------------------------------------------------- command mode
@@ -2421,7 +3327,10 @@ class MainWindow(QMainWindow):
 
 def main():
     app     = QApplication(sys.argv)
+    app.setApplicationName("ScrollReader")
+    _load_vga_font()
     config  = Config()
+    _apply_theme(config)
     history = History()
     initial = sys.argv[1] if len(sys.argv) > 1 and os.path.exists(sys.argv[1]) else None
     window  = MainWindow(config, history, initial_file=initial)
