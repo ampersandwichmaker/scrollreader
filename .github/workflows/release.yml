@@ -22,7 +22,7 @@ jobs:
 
       - name: Build exe with PyInstaller
         run: |
-          mkdir -p fonts
+          if (!(Test-Path fonts)) { New-Item -ItemType Directory -Path fonts }
           pyinstaller --onefile --windowed --name ScrollReader --icon=assets/icon.ico --add-data "fonts;fonts" scrollreader.py
 
       - name: Upload Windows exe
