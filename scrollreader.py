@@ -1978,12 +1978,14 @@ class ReaderWidget(QWidget):
                 self.config.set("ui_font_offset", str(_UI_FONT_OFFSET_ref[0]))
                 self._update_cmd_style(); self.update(); return
             if k == Qt.Key.Key_Comma:
-                pass; return   # handled by MainWindow
+                self._cycle_font(-1); return
             if k == Qt.Key.Key_Period:
-                pass; return   # handled by MainWindow
-
-
-            return  # eat unhandled Ctrl combos
+                self._cycle_font(1); return
+            if k == Qt.Key.Key_O:
+                self._cycle_swatch(-1); return
+            if k == Qt.Key.Key_P:
+                self._cycle_swatch(1); return
+            return  # eat other unhandled Ctrl combos
 
         # F11 fullscreen (no modifier needed)
         if k == Qt.Key.Key_F11:
