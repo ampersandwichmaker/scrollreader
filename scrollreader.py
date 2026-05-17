@@ -196,7 +196,8 @@ SWATCHES = {
                    "inv_bg": "#cc2266", "inv_fg": "#ffffff"},
 }
 SWATCH_NAMES = list(SWATCHES.keys())
-_current_swatch_ref = [0]   # index into SWATCH_NAMES
+_current_swatch_ref = [0]
+_pdf_invert_ref     = [False]   # per-book, updated on load/toggle
 
 
 def _apply_swatch(name: str, config):
@@ -288,6 +289,7 @@ DEFAULT_CONFIG = {
     "ui_font_offset":        0,
     "current_swatch":        "amber",
     "current_font_idx":      0,
+    "preload_inverted":      True,
     "eager_pages":           2,             # pages rendered synchronously each side of current
 }
 
@@ -485,6 +487,7 @@ def _book_defaults() -> dict:
         "bookmarks": [], "notes": [], "highlights": [],
         "removals": [],
         "config_overrides": {},
+        "pdf_invert": False,
     }
 
 
@@ -720,10 +723,11 @@ class PDFDocument:
         self.zoom       = zoom
         self.page_gap   = page_gap
         self.doc        = fitz.open(filepath)
-        self.page_pixmaps: list[Optional[QPixmap]] = []  # None = not yet rendered
-        self.page_offsets: list[int]               = []
-        self.page_sizes:   list[tuple]             = []  # (w_px, h_px) at zoom
-        self.lines:        list[LineInfo]          = []
+        self.page_pixmaps:     list[Optional[QPixmap]] = []
+        self.page_pixmaps_inv: list[Optional[QPixmap]] = []
+        self.page_offsets: list[int]  = []
+        self.page_sizes:   list[tuple]= []
+        self.lines:        list[LineInfo] = []
         self.total_height  = 0
         self.max_width     = 0
         first = self.doc[0].rect if self.doc else fitz.Rect(0,0,612,792)
@@ -732,7 +736,6 @@ class PDFDocument:
         self._parse()
 
     def _parse(self):
-        """Parse page geometry and extract text without rendering any pixels."""
         cy = 0
         for pn, page in enumerate(self.doc):
             r   = page.rect
@@ -740,7 +743,8 @@ class PDFDocument:
             h   = int(r.height * self.zoom)
             self.page_sizes.append((w, h))
             self.page_offsets.append(cy)
-            self.page_pixmaps.append(None)   # placeholder
+            self.page_pixmaps.append(None)
+            self.page_pixmaps_inv.append(None)
             self.max_width = max(self.max_width, w)
 
             for block in page.get_text("dict")["blocks"]:
@@ -756,30 +760,40 @@ class PDFDocument:
         self.lines.sort(key=lambda l: l.abs_y)
 
     def render_page(self, pn: int) -> QPixmap:
-        """Render a single page and cache it. Thread-safe for reading doc."""
         mat = fitz.Matrix(self.zoom, self.zoom)
         pix = self.doc[pn].get_pixmap(matrix=mat, alpha=False)
         img = QImage(pix.samples, pix.width, pix.height,
                      pix.stride, QImage.Format.Format_RGB888)
         return QPixmap.fromImage(img)
 
-    def render_range(self, start: int, end: int):
-        """Render pages [start, end] synchronously."""
+    def render_page_inv(self, pn: int) -> QPixmap:
+        """Render a page with colors inverted."""
+        mat = fitz.Matrix(self.zoom, self.zoom)
+        pix = self.doc[pn].get_pixmap(matrix=mat, alpha=False)
+        pix.invert_irect()   # C-level, very fast
+        img = QImage(pix.samples, pix.width, pix.height,
+                     pix.stride, QImage.Format.Format_RGB888)
+        return QPixmap.fromImage(img)
+
+    def render_range(self, start: int, end: int, inverted: bool = False):
         start = max(0, start)
         end   = min(len(self.doc) - 1, end)
         for pn in range(start, end + 1):
             if self.page_pixmaps[pn] is None:
                 self.page_pixmaps[pn] = self.render_page(pn)
+            if inverted and self.page_pixmaps_inv[pn] is None:
+                self.page_pixmaps_inv[pn] = self.render_page_inv(pn)
 
     def placeholder(self, pn: int) -> QPixmap:
-        """Grey placeholder pixmap for an unrendered page."""
         w, h = self.page_sizes[pn]
         pm   = QPixmap(w, h)
         pm.fill(QColor(38, 38, 38))
         return pm
 
-    def get_pixmap(self, pn: int) -> QPixmap:
-        """Return rendered pixmap or placeholder."""
+    def get_pixmap(self, pn: int, inverted: bool = False) -> QPixmap:
+        if inverted:
+            pm = self.page_pixmaps_inv[pn]
+            return pm if pm is not None else self.placeholder(pn)
         pm = self.page_pixmaps[pn]
         return pm if pm is not None else self.placeholder(pn)
 
@@ -789,24 +803,26 @@ class PDFDocument:
 
 
 class RenderThread(QThread):
-    page_ready = pyqtSignal(int, QPixmap)
+    page_ready     = pyqtSignal(int, QPixmap)
+    page_ready_inv = pyqtSignal(int, QPixmap)
 
-    def __init__(self, document: PDFDocument, start_page: int):
+    def __init__(self, document: PDFDocument, start_page: int,
+                 preload_inv: bool = True):
         super().__init__()
-        self.document   = document
-        self.start_page = start_page
-        self._cancel    = False
+        self.document    = document
+        self.start_page  = start_page
+        self.preload_inv = preload_inv
+        self._cancel     = False
 
     def cancel(self):
         self._cancel = True
 
     def run(self):
-        """Render pages outward from start_page, skipping already-rendered ones."""
-        n      = self.document.page_count
-        order  = _render_order(self.start_page, n)
+        n     = self.document.page_count
+        order = _render_order(self.start_page, n)
+        # Pass 1: normal render
         for pn in order:
-            if self._cancel:
-                return
+            if self._cancel: return
             if self.document.page_pixmaps[pn] is None:
                 try:
                     pm = self.document.render_page(pn)
@@ -814,6 +830,17 @@ class RenderThread(QThread):
                     self.page_ready.emit(pn, pm)
                 except Exception:
                     pass
+        # Pass 2: inverted render (if enabled)
+        if self.preload_inv:
+            for pn in order:
+                if self._cancel: return
+                if self.document.page_pixmaps_inv[pn] is None:
+                    try:
+                        pm_inv = self.document.render_page_inv(pn)
+                        self.document.page_pixmaps_inv[pn] = pm_inv
+                        self.page_ready_inv.emit(pn, pm_inv)
+                    except Exception:
+                        pass
 
 
 def _render_order(start: int, total: int) -> list[int]:
@@ -977,10 +1004,16 @@ class ReaderWidget(QWidget):
             self.panel        = None
             self._pending     = None
 
+            # Restore per-book invert state
+            _pdf_invert_ref[0] = bool(
+                self.history._entry(filepath).get("pdf_invert", False))
+
             # Synchronously render pages around current position
             cur_page  = doc.lines[self.current_line].page_num if doc.lines else 0
             eager     = int(self.config.get("eager_pages") or 2)
-            doc.render_range(cur_page - eager, cur_page + eager)
+            preload   = bool(self.config.get("preload_inverted") if self.config.get("preload_inverted") is not None else True)
+            doc.render_range(cur_page - eager, cur_page + eager,
+                             inverted=preload)
 
             self.update()
 
@@ -992,8 +1025,10 @@ class ReaderWidget(QWidget):
 
     def _start_render_thread(self, start_page: int):
         self._stop_render_thread()
-        t = RenderThread(self.document, start_page)
+        preload = bool(self.config.get("preload_inverted") if self.config.get("preload_inverted") is not None else True)
+        t = RenderThread(self.document, start_page, preload_inv=preload)
         t.page_ready.connect(self._on_page_ready)
+        t.page_ready_inv.connect(self._on_page_ready_inv)
         t.finished.connect(self._on_render_done)
         self._render_thread = t
         t.start()
@@ -1005,20 +1040,25 @@ class ReaderWidget(QWidget):
             self._render_thread = None
 
     def _on_page_ready(self, pn: int, pixmap: QPixmap):
-        """Called from main thread when background renders a page."""
         if self.document:
             self.document.page_pixmaps[pn] = pixmap
-            # Only repaint if this page is currently visible
-            scroll = self._scroll_offset()
-            py     = TOP_BAR_H + self.document.page_offsets[pn] - scroll
-            _, ph  = self.document.page_sizes[pn]
-            if py + ph >= TOP_BAR_H and py <= self.height():
-                self.update()
-            # Update status to show render progress
-            rendered = sum(1 for p in self.document.page_pixmaps if p is not None)
-            total    = self.document.page_count
-            if rendered < total:
-                self.update()
+            if not _pdf_invert_ref[0]:
+                self._repaint_if_visible(pn)
+
+    def _on_page_ready_inv(self, pn: int, pixmap: QPixmap):
+        if self.document:
+            self.document.page_pixmaps_inv[pn] = pixmap
+            if _pdf_invert_ref[0]:
+                self._repaint_if_visible(pn)
+
+    def _repaint_if_visible(self, pn: int):
+        if not self.document: return
+        scroll = self._scroll_offset()
+        vp     = self._vp()
+        py     = vp.y() + self.document.page_offsets[pn] - scroll
+        _, ph  = self.document.page_sizes[pn]
+        if py + ph >= vp.y() and py <= vp.bottom():
+            self.update()
 
     def _on_render_done(self):
         self._render_thread = None
@@ -1201,11 +1241,12 @@ class ReaderWidget(QWidget):
         total  = len(dlines)
 
         # ── Pages ─────────────────────────────────────────────────────────
+        inv = _pdf_invert_ref[0]
         for i in range(self.document.page_count):
             py = vp.y() + self.document.page_offsets[i] - scroll
             pw, ph = self.document.page_sizes[i]
             if py + ph >= vp.y() and py <= vp.bottom():
-                painter.drawPixmap(px, int(py), self.document.get_pixmap(i))
+                painter.drawPixmap(px, int(py), self.document.get_pixmap(i, inverted=inv))
 
         # ── Saved highlights (on PDF) ──────────────────────────────────────
         sh_col = QColor(self._cfg("saved_highlight_color") or AMBER.name())
@@ -1320,9 +1361,8 @@ class ReaderWidget(QWidget):
                 ref = self.status_text
             else:
                 ref = ("SPC/↓ NEXT   ↑/TAB BACK   CTRL+ENTER CMD   "
-                       "CTRL+L LIB   CTRL+N/B/H PANELS   "
-                       "CTRL+O/P SWATCH   CTRL+,/. FONT   "
-                       "SN/SP/SF/SL SEARCH   CC REPEAT")
+                       "CTRL+L LIB   CTRL+N/B/H PANELS   CTRL+U INVERT   "
+                       "CTRL+O/P SWATCH   CTRL+,/. FONT   SN/SP/SF/SL SEARCH")
             painter.drawText(6, h - 8, ref)
 
     # ── Margin indicators ─────────────────────────────────────────────────
@@ -1985,6 +2025,20 @@ class ReaderWidget(QWidget):
                 self._cycle_swatch(-1); return
             if k == Qt.Key.Key_P:
                 self._cycle_swatch(1); return
+            if k == Qt.Key.Key_U:
+                # Toggle per-book PDF inversion
+                _pdf_invert_ref[0] = not _pdf_invert_ref[0]
+                if self.document:
+                    self.history._entry(self.document.filepath)["pdf_invert"] = _pdf_invert_ref[0]
+                    self.history._save()
+                    # If inverted cache not ready yet, render now
+                    if _pdf_invert_ref[0]:
+                        cur_page = self.document.lines[self.current_line].page_num if self.document.lines else 0
+                        eager    = int(self.config.get("eager_pages") or 2)
+                        for pn in range(max(0, cur_page-eager), min(self.document.page_count, cur_page+eager+1)):
+                            if self.document.page_pixmaps_inv[pn] is None:
+                                self.document.page_pixmaps_inv[pn] = self.document.render_page_inv(pn)
+                self.update(); return
             return  # eat other unhandled Ctrl combos
 
         # F11 fullscreen (no modifier needed)
