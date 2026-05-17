@@ -234,7 +234,7 @@ def _scan_fonts() -> list:
         return []
     return sorted([os.path.join(fonts_dir, f)
                    for f in os.listdir(fonts_dir)
-                   if f.lower().endswith(('.ttf', '.otf'))])
+                   if f.lower().endswith(('.ttf', '.otf', '.otb'))])
 
 
 def _load_font_by_path(path: str) -> str:
@@ -2132,7 +2132,7 @@ class ReaderWidget(QWidget):
         if result:
             self.status_text = result
             self.update()
-            QTimer.singleShot(3000, lambda: self._clear_status())
+            QTimer.singleShot(5000, lambda: self._clear_status())
 
     def _cycle_font(self, direction: int):
         """Cycle through fonts in the fonts/ directory."""
@@ -2146,7 +2146,7 @@ class ReaderWidget(QWidget):
         self.config.set("current_font_idx", str(idx))
         self._update_cmd_style()
         self.status_text = f"font: {os.path.basename(fonts[idx])}"
-        QTimer.singleShot(2000, self._clear_status)
+        QTimer.singleShot(5000, self._clear_status)
         self.update()
 
 
@@ -2160,7 +2160,7 @@ class ReaderWidget(QWidget):
         _current_swatch_ref[0] = idx
         self._update_cmd_style()
         self.status_text = f"swatch: {name}"
-        QTimer.singleShot(2000, self._clear_status)
+        QTimer.singleShot(5000, self._clear_status)
         self.update()
 
     def _clear_status(self):
@@ -3392,6 +3392,19 @@ class LibraryWidget(QWidget):
 
         if k in (Qt.Key.Key_Tab, Qt.Key.Key_Backspace):
             self._go_back(); return
+        if ctrl:
+            if k == Qt.Key.Key_O:
+                self.parent().reader._cycle_swatch(-1)
+                self.update(); return
+            if k == Qt.Key.Key_P:
+                self.parent().reader._cycle_swatch(1)
+                self.update(); return
+            if k == Qt.Key.Key_Comma:
+                self.parent().reader._cycle_font(-1)
+                self.update(); return
+            if k == Qt.Key.Key_Period:
+                self.parent().reader._cycle_font(1)
+                self.update(); return
         if k in (Qt.Key.Key_Left, Qt.Key.Key_A):
             self._cycle_tab(-1); return
         if k in (Qt.Key.Key_Right, Qt.Key.Key_D):
