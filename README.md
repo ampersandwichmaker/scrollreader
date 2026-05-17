@@ -1,258 +1,212 @@
 # ScrollReader
 
-A focused, keyboard-driven PDF reader with line-by-line navigation, annotations, and export.
-
-ScrollReader keeps you in the text. A red indicator marks your current line and locks to the middle of the screen as you read — the document scrolls beneath it rather than the other way around. Everything is driven from a vim-style command bar: navigate, annotate, highlight, bookmark, export to Markdown, and print, all without leaving the keyboard.
+A focused, keyboard-driven PDF reader with a phosphor terminal aesthetic. Line-by-line navigation, annotations, a treemap library browser, and full colour theming.
 
 ---
 
-## Installation
+## Install & Run
 
-**Requirements:** Python 3.10+, and a PDF to read.
-
+**From source:**
 ```bash
 pip install PyMuPDF PyQt6
-# Optional: for print support
-pip install PyQt6  # PyQt6.QtPrintSupport is included in most PyQt6 distributions
+python scrollreader.py
 ```
 
-**Run:**
+**Windows exe:** Download `ScrollReader.exe` from [Releases](https://github.com/ampersandwichmaker/scrollreader/releases) — portable, no install needed.
 
-```bash
-python3 scrollreader.py
-# or open a file directly:
-python3 scrollreader.py ~/books/mybook.pdf
-```
-
-ScrollReader remembers your position in every book you open. If `reopen_last` is enabled (default), it reopens your last book automatically on launch.
+**Linux:** Download the tarball from [Releases](https://github.com/ampersandwichmaker/scrollreader/releases) and run the binary.
 
 ---
 
-## How It Works
-
-- **Space** or **↓** advances one line. **↑**, **Backspace**, or **Tab** go back.
-- The red `▶` indicator starts at the top of the screen and drifts down to a configurable midpoint (default ~42% from top). Once there, it stays fixed and the document scrolls under it — so your reading position is always in the same place on screen.
-- Press **Enter** to open the command bar (`:` prompt). Type a command and press **Enter** to run it, or **Escape** to cancel.
-- Amber triangles in the left margin mark bookmarks. Green dots mark notes. Blue bands mark saved highlights.
-
----
-
-## Keyboard Reference
+## Navigation
 
 | Key | Action |
 |-----|--------|
-| `Space` / `↓` | Next line |
-| `↑` / `Backspace` / `Tab` | Previous line |
-| `Scroll wheel` | Navigate lines |
-| `Page Down` | Jump one screenful forward |
-| `Page Up` | Jump one screenful back |
-| `Enter` | Open command mode |
-| `Escape` | Close panel / cancel / exit command mode |
+| `Space` / `↓` / `S` / `Enter` | Advance one line |
+| `↑` / `Tab` / `Backspace` / `W` | Back one line |
+| `→` / `D` / `PageDown` | Page forward |
+| `←` / `A` / `PageUp` | Page back |
+| `0` | Undo last move (50-step history) |
+| `F11` | Toggle fullscreen |
+
+**Open command bar:** `Ctrl+Enter` or `Ctrl+Space`
 
 ---
 
-## Command Reference
+## Commands
 
-Commands are entered via the command bar (press **Enter** to open). Type `help`, `man`, or `?` inside the app for the same reference rendered as a scrollable panel.
+Type `:command` in the command bar. `↑`/`↓` cycles command history.
 
-### Reading Controls
-
+### Opening & Navigation
 | Command | Description |
 |---------|-------------|
-| `Space  /  Down` | Advance one line |
-| `Up  /  Backspace  /  Tab` | Go back one line |
-| `Scroll wheel` | Navigate lines (one notch = one line) |
-| `Page Down` | Jump one screenful forward |
-| `Page Up` | Jump one screenful back |
-| `Enter` | Open command mode |
-| `Escape` | Close panel, cancel confirmation, or exit command mode |
+| `open <path>` | Open a PDF |
+| `gl <n>` | Go to line N |
+| `gp <n>` | Go to page N |
+| `sn <term>` | Search next occurrence |
+| `sp <term>` | Search previous |
+| `sf <term>` | Search first |
+| `sl <term>` | Search last |
+| `cc` | Repeat last command |
 
-### Command Mode
+Use `;;phrase here;;` for multi-word search: `sn ;;eternal return;;`
 
-*Press Enter to open the command bar (shows ':' prompt). Type a command and press Enter to run it, or Escape to cancel. Commands are case-insensitive.*
-
-### Opening Files
-
+### Annotations
 | Command | Description |
 |---------|-------------|
-| `open <path>` | Open a PDF file. Supports ~ expansion. |
-
-### Navigation Commands
-
-| Command | Description |
-|---------|-------------|
-| `gl<N>  /  gotoline<N>` | Jump to line N |
-| `gp<N>  /  gotopage<N>` | Jump to page N |
-| `lb[N]  /  lineback[N]` | Go back N lines (default 1) |
-| `lf[N]  /  lineforward[N]` | Go forward N lines (default 1) |
-| `pb[N]  /  pageback[N]` | Go back N pages (default 1) |
-| `pf[N]  /  pageforward[N]` | Go forward N pages (default 1) |
-
-### Range Syntax
-
-Many commands accept a range specifier appended directly to the command:
-
-| Syntax | Meaning |
-|--------|---------|
-| `<cmd>` | Current line or page |
-| `<cmd><N>` | Line/page N (absolute) |
-| `<cmd><A>-<B>` | Lines/pages A through B (absolute, A must be ≤ B) |
-| `<cmd><fwd>[;<back>]` | fwd forward + back backward from current |
-
-Examples:
-
-| Command | Meaning |
-|---------|---------|
-| `hl` | Highlight current line |
-| `hl5` | Highlight line 5 |
-| `hl40-89` | Highlight lines 40–89 |
-| `hl5;3` | Highlight fwd 5, back 3 from current line |
-| `rl40` | Remove annotations at line 40 |
-| `rl5;3` | Remove annotations fwd 5, back 3 from current |
-| `rp4-10` | Remove annotations on pages 4–10 |
-
-### Notes — `;;text;;`
-
-Any annotating command accepts an optional note using the `;;` delimiter appended to the end:
-
-```
-nl;;this is interesting::
-nl33;;note about line 33;;
-bl;;come back to this;;
-hl40-89;;key passage;;
-```
-
-### Annotation Commands
-
-| Command | Description |
-|---------|-------------|
-| `nl[N][;;note;;]` | Add note at current line or line N |
-| `bl[range][;;note;;]` | Bookmark a line |
-| `bp[range][;;note;;]` | Bookmark a page |
-| `hl[range][;;note;;]` | Highlight lines |
-| `hp[range][;;note;;]` | Highlight pages |
-
-### Annotation Panels
-
-| Command | Description |
-|---------|-------------|
-| `sn  /  shownotes` | Open notes panel |
-| `sb  /  showbookmarks` | Open bookmarks panel |
-| `sh  /  showhighlights` | Open highlights panel |
-
-Click any item in a panel to jump to that line. Press **Escape** to close.
-
-### Remove Commands
-
-All remove commands show a **y/n confirmation prompt** before executing. All accept an optional `;;reason;;` which is logged to history.
-
-| Command | Description |
-|---------|-------------|
-| `rl[range][;;reason;;]` | Remove all annotations touching a line range |
-| `rp[range][;;reason;;]` | Remove all annotations touching a page range |
-| `rb[range][;;reason;;]` | Remove bookmarks only |
-| `rn[range][;;reason;;]` | Remove notes only |
-| `rh[range][;;reason;;]` | Remove highlights only |
-| `removeall[;;reason;;]` | Remove ALL annotations for this book |
-| `removeall+` | Wipe ALL stored data for this book |
-
-*Partial overlap rule: if a remove range touches any part of an annotation, the entire annotation is deleted.*
-
-### Export Commands
-
-Exports write Markdown files. Two modes (set via `set export_mode <mode>`):
-
-- `timestamped` — new file per export: `title_YYYYMMDD_HHMMSS.md`
-- `running` — appends to `title_running.md`
-
-Default save location: same folder as the PDF. Change with `set export_dir <path>`.
-
-| Command | Description |
-|---------|-------------|
-| `e` | Export all annotations |
-| `el[range]` | Export by line range |
-| `ep[range]` | Export by page range |
-| `eb[range]` | Export bookmarks only |
-| `en[range]` | Export notes only |
-| `eh[range]` | Export highlights only |
-
-Examples: `el40-89`, `ep2-5`, `eb45`, `el5;3`
-
-### Print
-
-| Command | Description |
-|---------|-------------|
-| `pd` | Open system print dialog |
-| `pp[range]` | Print pages (same range syntax as everything else) |
-
-Examples: `pp` (current page), `pp5`, `pp2-8`, `pp3;1`
-
-*Requires `PyQt6.QtPrintSupport`.*
-
-### Zoom
-
-| Command | Description |
-|---------|-------------|
-| `zoom fit-width` | Fit page width to window (default) |
-| `zoom fit-page` | Fit full page height to window |
-| `zoom 50%` | Small fixed zoom |
-| `zoom 75%` | Medium fixed zoom |
-| `zoom 100%` | Large fixed zoom |
-| `zoom cycle` | Step through zoom modes in order |
+| `nl [note]` | Add note at current line |
+| `bl [note]` | Add bookmark |
+| `hl <range> [note]` | Highlight lines (e.g. `hl 5` or `hl 3-8`) |
+| `vn` / `vb` / `vh` | View notes / bookmarks / highlights panel |
+| `e` | Export all annotations to Markdown |
 
 ### Book Metadata
-
 | Command | Description |
 |---------|-------------|
-| `bookinfo` | Show title, author, status, progress, annotation counts |
-| `setmeta title <value>` | Set book title |
-| `setmeta author <value>` | Set author |
-| `setmeta status <value>` | `unread` / `reading` / `read` / `abandoned` |
-| `setmeta rating <1-5>` | Set rating |
-| `setmeta tags <a,b,c>` | Set comma-separated tags |
+| `setm title <title>` | Set book title |
+| `setm author <author>` | Set author |
+| `bs status reading` | Set status: reading / unread / read / abandoned |
+| `bs rating 4` | Set rating 1–5 |
+| `fav` / `unfav` | Add/remove from favourites |
 
-### Per-Book Display Overrides
+### Display
+| Command | Description |
+|---------|-------------|
+| `zoom fit-width` | Zoom mode (fit-width / fit-page / 50% / 75% / 100%) |
+| `ms` / `swapmargin` | Swap margin side (left ↔ right) — triggers re-render |
+| `set midpoint 0.42` | Reading indicator position (0–1) |
+| `set page_gap 30` | Gap between pages in pixels |
 
-Use `bookset <key> <value>` to override display settings for the current book only.
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `indicator_color` | `#ff4444` | Current-line indicator colour |
-| `highlight_alpha` | `35` | Opacity of current-line highlight band (0–255) |
-| `highlight_height` | `20` | Height in pixels of the highlight band |
-| `highlight_offset` | `0` | Vertical nudge of highlight band (negative = up) |
-| `saved_highlight_color` | `#4488ff` | Colour of saved highlights |
-| `saved_highlight_alpha` | `45` | Opacity of saved highlights |
-| `bookmark_color` | `#ffaa00` | Colour of bookmark margin markers |
-| `note_color` | `#44ff88` | Colour of note margin dots |
-
-### Global Config
-
-Use `set <key> <value>` to change global settings (saved to `~/.scrollreader/config.json`). Use `showconfig` to print all current values.
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `reopen_last` | `true` | Auto-reopen last book on launch |
-| `midpoint` | `0.42` | Screen fraction where indicator locks (0.0–1.0) |
-| `zoom_mode` | `fit-width` | Default zoom mode |
-| `background_color` | `#1a1a1a` | Background colour |
-| `statusbar_color` | `#111111` | Status bar background |
-| `statusbar_text_color` | `#888888` | Status bar text colour |
-| `page_gap` | `30` | Pixel gap between PDF pages |
-| `export_dir` | *(empty)* | Export directory (empty = same folder as PDF) |
-| `export_mode` | `timestamped` | `timestamped` or `running` |
-
-### Data Files
-
-ScrollReader stores its data in plain JSON — safe to edit in any text editor.
-
-| File | Contents |
-|------|----------|
-| `~/.scrollreader/config.json` | Global configuration |
-| `~/.scrollreader/history.json` | Per-book reading position, annotations, and metadata |
+### Library
+| Command | Description |
+|---------|-------------|
+| `lib` | Open library browser |
+| `set library_dir <path>` | Set library scan folder |
+| `set library_recursive true` | Scan subdirectories |
 
 ---
 
-## License
+## Keyboard Shortcuts
 
-MIT — see [LICENSE](LICENSE).
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+L` | Open library |
+| `Ctrl+N` | Notes panel |
+| `Ctrl+B` | Bookmarks panel |
+| `Ctrl+H` | Highlights panel |
+| `Ctrl+O` / `Ctrl+P` | Cycle colour swatch backward / forward |
+| `Ctrl+,` / `Ctrl+.` | Cycle font backward / forward |
+| `Ctrl+[` / `Ctrl+]` | Highlight band height ±2px |
+| `Ctrl+=` / `Ctrl+-` | UI border width ±1px |
+| `Ctrl+;` / `Ctrl+'` | UI font size ±1 |
+| `I` | Toggle PDF colour inversion (per-book, remembered) |
+| `F11` | Toggle fullscreen |
+
+---
+
+## Library Browser
+
+Open with `lib` or `Ctrl+L`. Closes with `Esc` or `Tab`.
+
+- **Treemap** — blocks sized by unread pages. Proportional area, largest = half screen.
+- **Navigate** — `↑`/`↓`/`W`/`S` move cursor between books.
+- **Tabs** — `←`/`→`/`A`/`D` cycle tabs instantly.
+- **Open** — `Space` or `Enter` opens the highlighted book.
+- **Overflow** — books too small to show go into a `+N more` cell. Select it to drill down infinitely.
+- **Tabs available** — EDIT META · SEARCH · FAVORITES · SETTINGS · READING · READ · UNREAD · ABANDONED
+
+---
+
+## Colour Themes
+
+`Ctrl+O` / `Ctrl+P` cycles through 15 built-in swatches:
+
+| Swatch | Feel |
+|--------|------|
+| `amber` | Classic warm phosphor (default) |
+| `phosphor` | Green terminal |
+| `cyan` | Teal CRT |
+| `blood` | Red phosphor |
+| `ice` | Cold blue night |
+| `paper` | Warm daylight, inverted |
+| `slate` | Muted blue-grey |
+| `gold` | High contrast gold |
+| `marathon` | White on Bungie blue |
+| `neon` | Black on acid green |
+| `mono_dark` | White on black |
+| `mono_light` | Black on white |
+| `ember` | Dark amber on white |
+| `rose` | Pink on near-white |
+| `lcd` | Pale yellow-green on black |
+
+Customise any colour:
+```
+set theme_primary #ffbb33
+set theme_bg #000000
+set theme_bright #ffb000
+```
+
+---
+
+## Fonts
+
+Ships with a curated set of fonts. Cycle with `Ctrl+,` / `Ctrl+.`.
+
+**Bundled fonts include:**
+
+| Font | Source |
+|------|--------|
+| IBM VGA 8x16 + 21 oldschool PC variants | [int10h.org](https://int10h.org/oldschool-pc-fonts/) — CC BY-SA 4.0, VileR |
+
+**Adding your own:** Drop any `.ttf`, `.otf`, or `.otb` file into a `fonts/` folder next to `scrollreader.py` (or `ScrollReader.exe`) and it appears in the cycle on next launch.
+
+See [`fonts/ATTRIBUTION.md`](fonts/ATTRIBUTION.md) for full licence details.
+
+---
+
+## METAR Notation
+
+Each book shows a compact status string: `N5B2H45R35P328`
+
+| Code | Meaning |
+|------|---------|
+| `N` | Notes count |
+| `B` | Bookmarks count |
+| `H` | Highlights count |
+| `R` | % read (0–100) |
+| `P` | Total pages |
+
+---
+
+## PDF Inversion
+
+Press `I` to invert page colours (white→black, black→white). Great for night reading with the `mono_dark` or `phosphor` swatch.
+
+- State is remembered **per book** — reopening a book restores its inversion state.
+- With `preload_inverted true` (default), the inverted cache is built in the background after normal rendering, so toggling is instant.
+- Disable pre-rendering: `set preload_inverted false` (saves memory on large books).
+
+---
+
+## Config
+
+Stored in `~/.scrollreader/config.json`. Key settings:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `reopen_last` | `true` | Reopen last book on launch |
+| `midpoint` | `0.42` | Indicator lock position (0–1) |
+| `zoom_mode` | `fit-width` | Default zoom |
+| `page_gap` | `30` | Gap between pages (px) |
+| `margin_side` | `right` | Annotation margin side |
+| `preload_inverted` | `true` | Pre-render inverted page cache |
+| `library_dir` | `~/Downloads` | Library scan root |
+| `current_swatch` | `amber` | Active colour swatch |
+| `ui_font_offset` | `0` | UI font size adjustment |
+| `ui_border_width` | `2` | UI border thickness (px) |
+
+---
+
+## Licence
+
+MIT — see [LICENSE](LICENSE)
