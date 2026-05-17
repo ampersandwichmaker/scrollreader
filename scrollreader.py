@@ -90,14 +90,24 @@ DEFAULT_SWATCH = [
 _UI_FONT_FAMILY = "Courier New"   # replaced at startup if VGA font loads
 
 
+def _app_dir() -> str:
+    """Directory containing the exe (frozen) or the script (source)."""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def _load_vga_font() -> str:
-    """Try to load IBM VGA 8x16 font from fonts/ dir. Returns family name."""
+    """Try to load IBM VGA 8x16 font. Returns family name."""
     global _UI_FONT_FAMILY
-    import os
+    base     = _app_dir()
+    meipass  = getattr(sys, '_MEIPASS', base)
     candidates = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "Px437_IBM_VGA_8x16.ttf"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "Px437_IBM_VGA-8x16.ttf"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "Web437_IBM_VGA_8x16.ttf"),
+        os.path.join(base,    "fonts", "Px437_IBM_VGA_8x16.ttf"),
+        os.path.join(base,    "fonts", "Px437_IBM_VGA-8x16.ttf"),
+        os.path.join(base,    "fonts", "Web437_IBM_VGA_8x16.ttf"),
+        os.path.join(meipass, "fonts", "Px437_IBM_VGA_8x16.ttf"),
+        os.path.join(meipass, "fonts", "Px437_IBM_VGA-8x16.ttf"),
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -218,8 +228,8 @@ def _apply_swatch(name: str, config):
 
 
 def _scan_fonts() -> list:
-    """Return list of TTF paths in the fonts/ directory."""
-    fonts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+    """Return list of TTF/OTF paths in fonts/ next to the exe or script."""
+    fonts_dir = os.path.join(_app_dir(), "fonts")
     if not os.path.exists(fonts_dir):
         return []
     return sorted([os.path.join(fonts_dir, f)
