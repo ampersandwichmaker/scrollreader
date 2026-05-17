@@ -204,6 +204,9 @@ SWATCHES = {
     "rose":       {"bg": "#fff0f5", "primary": "#cc2266", "bright": "#990044",
                    "dim": "#dd88aa", "dark": "#eebbd0", "very_dim": "#f8dde8",
                    "inv_bg": "#cc2266", "inv_fg": "#ffffff"},
+    "lcd":        {"bg": "#000000", "primary": "#e9fa72", "bright": "#f5ff99",
+                   "dim": "#8a9a20", "dark": "#4a5510", "very_dim": "#252d05",
+                   "inv_bg": "#e9fa72", "inv_fg": "#000000"},
 }
 SWATCH_NAMES = list(SWATCHES.keys())
 _current_swatch_ref = [0]
@@ -1370,9 +1373,9 @@ class ReaderWidget(QWidget):
             elif self.status_text:
                 ref = self.status_text
             else:
-                ref = ("SPC/↓ NEXT   ↑/TAB BACK   CTRL+ENTER CMD   "
-                       "CTRL+L LIB   CTRL+N/B/H PANELS   CTRL+U INVERT   "
-                       "CTRL+O/P SWATCH   CTRL+,/. FONT   SN/SP/SF/SL SEARCH")
+                ref = ("SPC/↓/S NEXT   ↑/TAB/W BACK   A/D or ←/→ PAGE   "
+                       "I INVERT   CTRL+ENTER CMD   CTRL+L LIB   "
+                       "CTRL+N/B/H PANELS   CTRL+O/P SWATCH   SN/SP/SF/SL SEARCH")
             painter.drawText(6, h - 8, ref)
 
     # ── Margin indicators ─────────────────────────────────────────────────
@@ -2035,20 +2038,6 @@ class ReaderWidget(QWidget):
                 self._cycle_swatch(-1); return
             if k == Qt.Key.Key_P:
                 self._cycle_swatch(1); return
-            if k == Qt.Key.Key_U:
-                # Toggle per-book PDF inversion
-                _pdf_invert_ref[0] = not _pdf_invert_ref[0]
-                if self.document:
-                    self.history._entry(self.document.filepath)["pdf_invert"] = _pdf_invert_ref[0]
-                    self.history._save()
-                    # If inverted cache not ready yet, render now
-                    if _pdf_invert_ref[0]:
-                        cur_page = self.document.lines[self.current_line].page_num if self.document.lines else 0
-                        eager    = int(self.config.get("eager_pages") or 2)
-                        for pn in range(max(0, cur_page-eager), min(self.document.page_count, cur_page+eager+1)):
-                            if self.document.page_pixmaps_inv[pn] is None:
-                                self.document.page_pixmaps_inv[pn] = self.document.render_page_inv(pn)
-                self.update(); return
             return  # eat other unhandled Ctrl combos
 
         # F11 fullscreen (no modifier needed)
@@ -2065,10 +2054,27 @@ class ReaderWidget(QWidget):
             else: w.showFullScreen()
             return
         if k in (Qt.Key.Key_Space, Qt.Key.Key_Return,
-                 Qt.Key.Key_Enter, Qt.Key.Key_Down):  self._step(1)
-        elif k in (Qt.Key.Key_Up, Qt.Key.Key_Backspace, Qt.Key.Key_Tab): self._step(-1)
-        elif k == Qt.Key.Key_PageDown: self._step(self._lines_per_screen())
-        elif k == Qt.Key.Key_PageUp:   self._step(-self._lines_per_screen())
+                 Qt.Key.Key_Enter, Qt.Key.Key_Down,
+                 Qt.Key.Key_S):                          self._step(1)
+        elif k in (Qt.Key.Key_Up, Qt.Key.Key_Backspace,
+                   Qt.Key.Key_Tab, Qt.Key.Key_W):        self._step(-1)
+        elif k in (Qt.Key.Key_PageDown, Qt.Key.Key_Right,
+                   Qt.Key.Key_D):   self._step(self._lines_per_screen())
+        elif k in (Qt.Key.Key_PageUp, Qt.Key.Key_Left,
+                   Qt.Key.Key_A):   self._step(-self._lines_per_screen())
+        elif k == Qt.Key.Key_I:
+            # Toggle per-book PDF inversion
+            _pdf_invert_ref[0] = not _pdf_invert_ref[0]
+            if self.document:
+                self.history._entry(self.document.filepath)["pdf_invert"] = _pdf_invert_ref[0]
+                self.history._save()
+                if _pdf_invert_ref[0]:
+                    cur_page = self.document.lines[self.current_line].page_num if self.document.lines else 0
+                    eager    = int(self.config.get("eager_pages") or 2)
+                    for pn in range(max(0, cur_page-eager), min(self.document.page_count, cur_page+eager+1)):
+                        if self.document.page_pixmaps_inv[pn] is None:
+                            self.document.page_pixmaps_inv[pn] = self.document.render_page_inv(pn)
+            self.update()
         elif k == Qt.Key.Key_0:
             prev = self._pop_history()
             if prev is not None and self.document:
