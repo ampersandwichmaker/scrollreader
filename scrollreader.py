@@ -1395,9 +1395,9 @@ class ReaderWidget(QWidget):
                 ref = self.status_text
             else:
                 ref = ("SPC/↓/S NEXT   ↑/TAB/W BACK   A/D PAGE   "
-                       "L LIB   N/B/H PANELS   I INVERT   ?  HELP   "
-                       "gg TOP   G BOTTOM   CTRL+K/L SWATCH   CTRL+O/P IND.COLOR   "
-                       "SN/SP/SF/SL SEARCH   CC REPEAT   = UNDO")
+                       "L LIB   N/B/H PANELS   R READING   I INVERT   ? HELP   "
+                       "CTRL++ ZOOM IN   CTRL+- ZOOM OUT   CTRL+U/I MIDPOINT   "
+                       "CTRL+K/L SWATCH   CTRL+O/P IND.COLOR   = UNDO")
             painter.drawText(6, h - 8, ref)
 
     # ── Margin indicators ─────────────────────────────────────────────────
@@ -1563,17 +1563,18 @@ class ReaderWidget(QWidget):
         font     = _ui_font(9)
         pw       = mr.width()
         px       = mr.left()
-        py       = mr.top() + 4
+        py       = mr.top() + 8
 
-        # Mode label + separator — draw separator BELOW the label with enough gap
+        # Mode label
         painter.setPen(AMBER_DIM)
         painter.setFont(font_b)
         mode_label = (self._panel_mode or "").upper()
-        painter.drawText(px+8, py+16, mode_label)
-        py += 22
-        painter.setPen(_mk_pen(AMBER_VERY_DIM, self._bw()))
+        painter.drawText(px+8, py+14, mode_label)
+        py += 20
+        # Separator line — drawn clearly below text
+        painter.setPen(_mk_pen(AMBER_VERY_DIM, 1))
         painter.drawLine(px+4, py, px+pw-4, py)
-        py += 6
+        py += 8
 
         if not items:
             painter.setPen(AMBER_DARK)
@@ -1636,6 +1637,22 @@ class ReaderWidget(QWidget):
             painter.setPen(_mk_pen(AMBER_VERY_DIM, self._bw()))
             painter.drawLine(px+4, py+item_h, px+pw-4, py+item_h)
             py += item_h
+
+    def _adjust_zoom(self, delta: float):
+        """Zoom in or out, keeping current line position."""
+        if not self.document: return
+        cur_zoom = self.document.zoom
+        new_zoom = round(max(0.3, min(5.0, cur_zoom + delta)), 2)
+        if new_zoom == cur_zoom: return
+        line = self.current_line
+        self.config.set("zoom_fixed", new_zoom)
+        self.config.set("zoom_mode", "fixed")
+        self.zoom_mode = "fixed"
+        self._rerender()
+        self.current_line = min(line, max(0, len(self.document.lines)-1))
+        self.status_text  = f"zoom: {int(new_zoom*100)}%"
+        QTimer.singleShot(3000, self._clear_status)
+        self.update()
 
     def _cycle_indicator_color(self, delta_deg: int):
         """Shift the indicator (main line) color by delta_deg on the HSV hue wheel."""
@@ -2034,20 +2051,25 @@ class ReaderWidget(QWidget):
 
         # ── Annotation panel navigation ───────────────────────────────────
         if self._panel_mode:
-            if k in (Qt.Key.Key_Tab, Qt.Key.Key_Escape):
-                self._panel_back()
-            elif k in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                self._panel_select()
-            elif k in (Qt.Key.Key_Down, Qt.Key.Key_Right,
-                       Qt.Key.Key_S, Qt.Key.Key_D):
-                self._panel_navigate(1)
-            elif k in (Qt.Key.Key_Up, Qt.Key.Key_Left,
-                       Qt.Key.Key_W, Qt.Key.Key_A):
-                self._panel_navigate(-1)
-            if ctrl and k == Qt.Key.Key_Return:
-                if time.time() > self._cmd_cooldown:
-                    self._enter_command_mode()
-            return
+            # Global mode keys work even from panels
+            if not ctrl and k in (Qt.Key.Key_N, Qt.Key.Key_B, Qt.Key.Key_H,
+                                   Qt.Key.Key_L, Qt.Key.Key_R, Qt.Key.Key_I):
+                pass  # fall through to normal key handling below
+            else:
+                if k in (Qt.Key.Key_Tab, Qt.Key.Key_Escape):
+                    self._panel_back()
+                elif k in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    self._panel_select()
+                elif k in (Qt.Key.Key_Down, Qt.Key.Key_Right,
+                           Qt.Key.Key_S, Qt.Key.Key_D):
+                    self._panel_navigate(1)
+                elif k in (Qt.Key.Key_Up, Qt.Key.Key_Left,
+                           Qt.Key.Key_W, Qt.Key.Key_A):
+                    self._panel_navigate(-1)
+                if ctrl and k == Qt.Key.Key_Return:
+                    if time.time() > self._cmd_cooldown:
+                        self._enter_command_mode()
+                return
 
         # ── Help/overlay panel ────────────────────────────────────────────
         if self.panel:
@@ -2079,6 +2101,22 @@ class ReaderWidget(QWidget):
                 self._cycle_indicator_color(-5); return
             if k == Qt.Key.Key_P:
                 self._cycle_indicator_color(5); return
+            if k == Qt.Key.Key_U:
+                cur = float(self.config.get("midpoint") or 0.42)
+                self.config.set("midpoint", round(max(0.1, cur - 0.02), 3))
+                self.status_text = f"midpoint: {self.config.get('midpoint')}"
+                QTimer.singleShot(3000, self._clear_status)
+                self.update(); return
+            if k == Qt.Key.Key_I:
+                cur = float(self.config.get("midpoint") or 0.42)
+                self.config.set("midpoint", round(min(0.9, cur + 0.02), 3))
+                self.status_text = f"midpoint: {self.config.get('midpoint')}"
+                QTimer.singleShot(3000, self._clear_status)
+                self.update(); return
+            if k in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+                self._adjust_zoom(0.15); return
+            if k == Qt.Key.Key_Minus:
+                self._adjust_zoom(-0.15); return
             if k == Qt.Key.Key_BracketLeft:
                 cur = int(self._cfg("highlight_height") or 20)
                 self.config.set("highlight_height", str(max(4, cur - 2)))
