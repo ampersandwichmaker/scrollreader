@@ -959,6 +959,15 @@ class ReaderWidget(QWidget):
 
     def resizeEvent(self, ev):
         self.cmd.setGeometry(0, self.height()-BOTTOM_BAR_H, self.width(), BOTTOM_BAR_H)
+        # Show dimensions while resizing
+        self.status_text = f"{self.width()} × {self.height()}"
+        if hasattr(self, '_resize_timer'):
+            self._resize_timer.stop()
+        else:
+            self._resize_timer = QTimer(self)
+            self._resize_timer.setSingleShot(True)
+            self._resize_timer.timeout.connect(self._clear_status)
+        self._resize_timer.start(1500)
         super().resizeEvent(ev)
 
     def _enter_command_mode(self):
