@@ -427,6 +427,7 @@ def parse_shortcut(text: str) -> Optional[dict]:
     # Annotation creates
     for pat, cmd, hl in [
         (r"(nl|noteline)(" + RANGE_CHARS + r")",         "note",           False),
+        (r"(an|audionote)(" + RANGE_CHARS + r")",        "audio_note",     False),
         (r"(bl|bookmarkline)(" + RANGE_CHARS + r")",     "bookmark_line",  False),
         (r"(bp|bookmarkpage)(" + RANGE_CHARS + r")",     "bookmark_page",  False),
         (r"(hl|highlightline)(" + RANGE_CHARS + r")",    "highlight_line", False),
@@ -443,6 +444,7 @@ def parse_shortcut(text: str) -> Optional[dict]:
         (r"(rp|removepage)(" + RANGE_CHARS + r")",      "remove_page"),
         (r"(rb|removebookmark)(" + RANGE_CHARS + r")",  "remove_bookmark"),
         (r"(rn|removenote)(" + RANGE_CHARS + r")",      "remove_note"),
+        (r"(ran|removeaudionote)(" + RANGE_CHARS + r")","remove_audio_note"),
         (r"(rh|removehighlight)(" + RANGE_CHARS + r")", "remove_highlight"),
     ]:
         m = re.fullmatch(pat, b)
@@ -1152,14 +1154,35 @@ class ReaderWidget(QWidget):
         return float(self.config.get("zoom_fixed") or 1.5)
 
     def _rerender(self):
+        """Re-render document at new zoom without full reload."""
         if not self.document: return
-        old = self.current_line
-        self.update(); QApplication.processEvents()
+        old_line = self.current_line
+        fp       = self.document.filepath
+
+        # Stop any background render thread first
+        self._stop_render_thread()
+
+        # Recompute zoom
+        new_zoom = self._compute_zoom(self.zoom_mode, peek_path=fp)
+        if abs(new_zoom - self.document.zoom) < 0.001:
+            return  # no change needed
+
         try:
-            self.load_document(self.document.filepath)
-            self.current_line = min(old, max(0, len(self.document.lines)-1))
+            # Rebuild document at new zoom
+            doc = PDFDocument(fp, zoom=new_zoom,
+                              page_gap=int(self.config.get("page_gap") or 30))
+            self.document = doc
+            self.current_line = min(old_line, max(0, len(doc.lines)-1))
+
+            # Synchronous render of visible pages
+            cur_page = doc.lines[self.current_line].page_num if doc.lines else 0
+            eager    = int(self.config.get("eager_pages") or 2)
+            preload  = self.config.get("preload_inverted") is not False
+            doc.render_range(cur_page - eager, cur_page + eager,
+                             inverted=preload)
+            self._start_render_thread(cur_page)
         except Exception as ex:
-            pass
+            self.status_text = f"zoom error: {ex}"
         self.update()
 
     # -------------------------------------------------------------- helpers
@@ -1478,6 +1501,8 @@ class ReaderWidget(QWidget):
 
         if self._panel_mode:
             self._paint_panel_list(painter, mr, e, lh)
+        elif getattr(self, '_search_panel_active', False):
+            self._paint_search_panel(painter, mr)
         else:
             self._paint_margin_reading(painter, mr, scroll, voff, vp,
                                         dlines, total, lh, ind_y, e, side)
@@ -1606,22 +1631,9 @@ class ReaderWidget(QWidget):
         px       = mr.left()
         py       = mr.top()
 
-        # Header background strip
-        painter.fillRect(QRect(px, py, pw, 32), AMBER_VERY_DIM)
-
-        # Mode label centered in header
-        painter.setPen(AMBER_BRIGHT)
-        painter.setFont(font_b)
-        mode_label = (self._panel_mode or "").upper()
-        painter.drawText(QRect(px, py, pw, 32),
-                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                         "  " + mode_label)
-
-        # Separator below header
-        py += 32
-        painter.setPen(_mk_pen(AMBER_DARK, self._bw()))
-        painter.drawLine(px, py, px+pw, py)
-        py += 6
+        # Thin separator at top, no label (mode shown in top bar)
+        painter.fillRect(QRect(px, py, pw, 4), AMBER_VERY_DIM)
+        py += 8
 
         if not items:
             painter.setPen(AMBER_DARK)
@@ -2087,6 +2099,52 @@ class ReaderWidget(QWidget):
         k    = ev.key()
         ctrl = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
 
+        # ── Search panel ──────────────────────────────────────────────────
+        if getattr(self, '_search_panel_active', False):
+            if not ctrl:
+                if k == Qt.Key.Key_R:
+                    self._search_panel_active = False
+                    self.current_line = self._search_pre_line
+                    self.update(); return
+                if k == Qt.Key.Key_L:
+                    self._search_panel_active = False
+                    self.window().show_library(); return
+                if k == Qt.Key.Key_N:
+                    self._search_panel_active = False
+                    self._open_annot_panel("notes"); return
+                if k == Qt.Key.Key_B:
+                    self._search_panel_active = False
+                    self._open_annot_panel("bookmarks"); return
+                if k == Qt.Key.Key_H:
+                    self._search_panel_active = False
+                    self._open_annot_panel("highlights"); return
+                if k in (Qt.Key.Key_J, Qt.Key.Key_Escape, Qt.Key.Key_Tab):
+                    self._search_panel_active = False
+                    self.current_line = self._search_pre_line
+                    self.update(); return
+                if k in (Qt.Key.Key_Up, Qt.Key.Key_W):
+                    self._search_cursor = max(0, self._search_cursor - 1)
+                    self.update(); return
+                if k in (Qt.Key.Key_Down, Qt.Key.Key_S):
+                    items = getattr(self, '_search_results', [])
+                    self._search_cursor = min(len(items)+1, self._search_cursor + 1)
+                    self.update(); return
+                if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+                    self._search_select(); return
+                # Typing updates search query
+                ch = ev.text()
+                if ch and ch.isprintable():
+                    q = getattr(self, '_search_query', "") + ch
+                    self._search_query = q
+                    self._run_search(q)
+                    self.update(); return
+                if k == Qt.Key.Key_Backspace:
+                    q = getattr(self, '_search_query', "")
+                    self._search_query = q[:-1]
+                    self._run_search(self._search_query)
+                    self.update(); return
+            return
+
         # ── Config popup ──────────────────────────────────────────────────────
         if getattr(self, '_config_popup_open', False):
             settings = self._config_popup_settings()
@@ -2151,11 +2209,31 @@ class ReaderWidget(QWidget):
 
         # ── Help/overlay panel ────────────────────────────────────────────
         if self.panel:
-            if k in (Qt.Key.Key_Escape, Qt.Key.Key_Tab):
+            # Mode keys work even from help panel
+            if not ctrl and not self.command_mode:
+                if k == Qt.Key.Key_R:
+                    self.panel = None; self._panel_scroll = 0; self.update(); return
+                if k == Qt.Key.Key_L:
+                    self.panel = None; self._panel_scroll = 0
+                    self.window().show_library(); return
+                if k == Qt.Key.Key_N:
+                    self.panel = None; self._panel_scroll = 0
+                    self._open_annot_panel("notes"); return
+                if k == Qt.Key.Key_B:
+                    self.panel = None; self._panel_scroll = 0
+                    self._open_annot_panel("bookmarks"); return
+                if k == Qt.Key.Key_H:
+                    self.panel = None; self._panel_scroll = 0
+                    self._open_annot_panel("highlights"); return
+                if k == Qt.Key.Key_J:
+                    self.panel = None; self._panel_scroll = 0
+                    self._open_search_panel(); return
+            if k in (Qt.Key.Key_Escape, Qt.Key.Key_Tab,
+                     Qt.Key.Key_Question, Qt.Key.Key_Slash):
                 self.panel = None; self._panel_scroll = 0; self.update()
-            elif k in (Qt.Key.Key_Down, Qt.Key.Key_Space):
+            elif k in (Qt.Key.Key_Down, Qt.Key.Key_Space, Qt.Key.Key_S):
                 self._panel_scroll += 40; self.update()
-            elif k == Qt.Key.Key_Up:
+            elif k in (Qt.Key.Key_Up, Qt.Key.Key_W):
                 self._panel_scroll = max(0, self._panel_scroll - 40); self.update()
             elif k == Qt.Key.Key_PageDown:
                 self._panel_scroll += self.height() - TOP_BAR_H - 60; self.update()
@@ -2274,8 +2352,9 @@ class ReaderWidget(QWidget):
             if prev is not None and self.document:
                 self.current_line = max(0, min(len(self.document.lines)-1, prev))
                 self.update()
-        elif k == Qt.Key.Key_Question:
-            # Help panel
+        elif k == Qt.Key.Key_J:
+            self._open_search_panel()
+        elif k in (Qt.Key.Key_Question, Qt.Key.Key_Slash):
             self._open_panel("ScrollReader — Command Reference", "help")
         elif k == Qt.Key.Key_G:
             if ev.modifiers() & Qt.KeyboardModifier.ShiftModifier:
@@ -2586,6 +2665,50 @@ class ReaderWidget(QWidget):
         self._panel_scroll = 0
         self.update()
 
+    def _open_search_panel(self):
+        """Open the search panel."""
+        if not self.document: return
+        self._search_panel_active = True
+        self._search_results      = getattr(self, '_search_results', [])
+        self._search_pre_line     = self.current_line
+        self._search_cursor       = 0
+        self._search_query        = getattr(self, '_search_query', "")
+        self.update()
+
+    def _run_search(self, query: str):
+        """Run search and store results as list of line indices."""
+        if not self.document or not query: return
+        pattern = re.compile(re.escape(query), re.IGNORECASE)
+        self._search_results = [
+            i for i, ln in enumerate(self.document.lines)
+            if pattern.search(ln.text)
+        ]
+        self._search_cursor = 0
+
+    def _search_select(self):
+        """Handle selection in search panel."""
+        results = getattr(self, '_search_results', [])
+        cur     = getattr(self, '_search_cursor', 0)
+        # 0=PREVIOUS, 1=NEXT, 2+ = result entries
+        if cur == 0:
+            # Previous result before current line
+            matches = [r for r in results if r < self.current_line]
+            if matches:
+                self._push_history(self.current_line)
+                self.current_line = matches[-1]
+        elif cur == 1:
+            # Next result after current line
+            matches = [r for r in results if r > self.current_line]
+            if matches:
+                self._push_history(self.current_line)
+                self.current_line = matches[0]
+        else:
+            idx = cur - 2
+            if 0 <= idx < len(results):
+                self._push_history(self.current_line)
+                self.current_line = results[idx]
+        self.update()
+
     def _clear_status(self):
         self.status_text = ""
         self.update()
@@ -2801,6 +2924,44 @@ class ReaderWidget(QWidget):
             if rs.mode == "error": return f"range error: {rs.error}"
             sl, _ = self._resolve_line_range(rs)
             return self.history.add_note(doc.filepath, sl, p.get("note",""))
+
+        if cmd == "audio_note":
+            if not HAS_AUDIO: return "audio not available — install sounddevice and soundfile"
+            rs   = p["range"]
+            if rs.mode == "error": return f"range error: {rs.error}"
+            sl, _ = self._resolve_line_range(rs)
+            if _audio_recorder.recording:
+                path = _audio_path(doc.filepath, sl)
+                if _audio_recorder.stop_and_save(path):
+                    self._vu_active = False
+                    return self.history.add_audio_note(doc.filepath, sl, path)
+                return "recording failed to save"
+            else:
+                if _audio_recorder.start():
+                    self._vu_active = True
+                    self.update()
+                    return f"recording... run 'an' again to stop and save at L{sl+1}"
+                return "failed to start recording — check microphone"
+
+        if cmd == "remove_audio_note":
+            rs = p["range"]
+            if rs.mode == "error": return f"range error: {rs.error}"
+            sl, el = self._resolve_line_range(rs)
+            e  = self.history._entry(doc.filepath)
+            an = e.get("audio_notes", [])
+            before = len(an)
+            remove = [n for n in an if sl <= n.get("line", 0) <= el]
+            if not remove: return f"no audio notes in range"
+            def _do():
+                for item in remove:
+                    try: os.remove(item["audio_path"])
+                    except: pass
+                e["audio_notes"] = [n for n in an if n not in remove]
+                self.history._save()
+                return f"removed {len(remove)} audio note(s)"
+            self._pending = {"prompt": f"remove {len(remove)} audio note(s)?", "action": _do}
+            self.update()
+            return None
 
         if cmd == "bookmark_line":
             rs = p["range"]
