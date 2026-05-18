@@ -327,6 +327,10 @@ DEFAULT_CONFIG = {
     "current_font_idx":      0,
     "preload_inverted":      True,
     "start_fullscreen":      True,
+    "top_bar_h":             28,
+    "bottom_bar_h":          28,
+    "panel_w":               160,
+    "reference_dir":         None,
     "help_col_offset":       0,
     "library_flip_mode":     False,
     "eager_pages":           2,             # pages rendered synchronously each side of current
@@ -1702,16 +1706,32 @@ class ReaderWidget(QWidget):
         QTimer.singleShot(3000, self._clear_status)
         self.update()
 
-    def _cycle_indicator_color(self, delta_deg: int):
-        """Shift the indicator (main line) color by delta_deg on the HSV hue wheel."""
-        cur = QColor(self.config.get("indicator_color") or "#ffb000")
+    def _adj_dim(self, key: str, delta: int, mn: int, mx: int):
+        """Adjust a UI dimension config value, clamped to [mn, mx]."""
+        global TOP_BAR_H, BOTTOM_BAR_H, PANEL_W
+        cur = int(self.config.get(key) or {
+            "top_bar_h": TOP_BAR_H, "bottom_bar_h": BOTTOM_BAR_H,
+            "panel_w": PANEL_W}.get(key, mn))
+        new_val = max(mn, min(mx, cur + delta))
+        self.config.set(key, new_val)
+        # Apply immediately to module globals
+        if key == "top_bar_h":    TOP_BAR_H    = new_val
+        elif key == "bottom_bar_h": BOTTOM_BAR_H = new_val
+        elif key == "panel_w":    PANEL_W      = new_val
+        self.cmd.setGeometry(0, self.height()-BOTTOM_BAR_H, self.width(), BOTTOM_BAR_H)
+        self.status_text = f"{key}: {new_val}"
+        QTimer.singleShot(3000, self._clear_status)
+        self.update()
+
+    def _cycle_indicator_color(self, delta_deg: int, key: str = "indicator_color"):
+        """Shift a color config key by delta_deg on the HSV hue wheel."""
+        cur = QColor(self.config.get(key) or "#ffb000")
         h, s, v, _ = cur.getHsvF()
         new_h = (h + delta_deg / 360.0) % 1.0
         new_color = QColor.fromHsvF(new_h, max(0.6, s), max(0.7, v))
         hex_color = new_color.name()
-        self.config.set("indicator_color", hex_color)
-        self.config.data["indicator_color"] = hex_color  # ensure immediate effect
-        self.status_text = f"indicator: {hex_color}"
+        self.config.set(key, hex_color)
+        self.status_text = f"{key}: {hex_color}"
         QTimer.singleShot(3000, self._clear_status)
         self.update()
 
@@ -2250,21 +2270,86 @@ class ReaderWidget(QWidget):
         # ── Ctrl shortcuts ────────────────────────────────────────────────
         if ctrl:
             if k in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                # If search panel open, activate text input; otherwise open command bar
                 if getattr(self, '_search_panel_active', False):
                     self._search_input_active = True
                     self.update(); return
-                if not getattr(self, '_search_input_active', False):
-                    self._enter_command_mode(); return
-                return
+                self._enter_command_mode(); return
+
+            # ── Layout sizing ─────────────────────────────────────────────
+            if k == Qt.Key.Key_T:
+                self._adj_dim("top_bar_h", -2, 16, 60); return
+            if k == Qt.Key.Key_Y:
+                self._adj_dim("top_bar_h", 2, 16, 60); return
+            if k == Qt.Key.Key_G:
+                self._adj_dim("panel_w", -5, 80, 400); return
+            if k == Qt.Key.Key_H:
+                self._adj_dim("panel_w", 5, 80, 400); return
+            if k == Qt.Key.Key_B:
+                self._adj_dim("bottom_bar_h", -2, 16, 60); return
+            if k == Qt.Key.Key_N:
+                self._adj_dim("bottom_bar_h", 2, 16, 60); return
+            if k == Qt.Key.Key_Comma:
+                cur = int(self.config.get("page_gap") or 30)
+                self.config.set("page_gap", max(0, cur - 5))
+                self.status_text = f"page gap: {self.config.get('page_gap')}px"
+                QTimer.singleShot(3000, self._clear_status)
+                self.update(); return
+            if k == Qt.Key.Key_Period:
+                cur = int(self.config.get("page_gap") or 30)
+                self.config.set("page_gap", cur + 5)
+                self.status_text = f"page gap: {self.config.get('page_gap')}px"
+                QTimer.singleShot(3000, self._clear_status)
+                self.update(); return
+
+            # ── Typography ────────────────────────────────────────────────
+            if k == Qt.Key.Key_E:
+                self._cycle_font(-1); return
+            if k == Qt.Key.Key_R:
+                self._cycle_font(1); return
+            if k == Qt.Key.Key_D:
+                _UI_FONT_OFFSET_ref[0] = max(-6, _UI_FONT_OFFSET_ref[0] - 1)
+                self.config.set("ui_font_offset", str(_UI_FONT_OFFSET_ref[0]))
+                self._update_cmd_style(); self.update(); return
+            if k == Qt.Key.Key_F:
+                _UI_FONT_OFFSET_ref[0] += 1
+                self.config.set("ui_font_offset", str(_UI_FONT_OFFSET_ref[0]))
+                self._update_cmd_style(); self.update(); return
+            if k == Qt.Key.Key_J:
+                cur = int(self.config.get("ui_border_width") or 2)
+                self.config.set("ui_border_width", str(max(1, cur - 1)))
+                self.update(); return
             if k == Qt.Key.Key_K:
-                self._cycle_swatch(-1); return
+                cur = int(self.config.get("ui_border_width") or 2)
+                self.config.set("ui_border_width", str(cur + 1))
+                self.update(); return
+
+            # ── Highlight ─────────────────────────────────────────────────
+            if k == Qt.Key.Key_BracketLeft:
+                cur = int(self._cfg("highlight_height") or 20)
+                self.config.set("highlight_height", str(max(4, cur - 2)))
+                self.update(); return
+            if k == Qt.Key.Key_BracketRight:
+                cur = int(self._cfg("highlight_height") or 20)
+                self.config.set("highlight_height", str(cur + 2))
+                self.update(); return
+            if k == Qt.Key.Key_Semicolon:
+                self._cycle_indicator_color(-5, key="highlight_color"); return
+            if k == Qt.Key.Key_Apostrophe:
+                self._cycle_indicator_color(5,  key="highlight_color"); return
             if k == Qt.Key.Key_L:
+                cur = int(self._cfg("highlight_alpha") or 35)
+                self.config.set("highlight_alpha", str(max(0, min(255, cur + 10))))
+                self.update(); return
+
+            # ── Theme ─────────────────────────────────────────────────────
+            if k == Qt.Key.Key_M:
                 self._cycle_swatch(1); return
             if k == Qt.Key.Key_O:
                 self._cycle_indicator_color(-5); return
             if k == Qt.Key.Key_P:
                 self._cycle_indicator_color(5); return
+
+            # ── Reading ───────────────────────────────────────────────────
             if k == Qt.Key.Key_U:
                 cur = float(self.config.get("midpoint") or 0.42)
                 self.config.set("midpoint", round(max(0.1, cur - 0.02), 3))
@@ -2278,48 +2363,10 @@ class ReaderWidget(QWidget):
                 QTimer.singleShot(3000, self._clear_status)
                 self.update(); return
 
-            if k == Qt.Key.Key_BracketLeft:
-                cur = int(self._cfg("highlight_height") or 20)
-                self.config.set("highlight_height", str(max(4, cur - 2)))
-                self.update(); return
-            if k == Qt.Key.Key_BracketRight:
-                cur = int(self._cfg("highlight_height") or 20)
-                self.config.set("highlight_height", str(cur + 2))
-                self.update(); return
-            if k == Qt.Key.Key_Equal:
-                cur = int(self.config.get("ui_border_width") or 2)
-                self.config.set("ui_border_width", str(cur + 1))
-                self.update(); return
-            if k == Qt.Key.Key_Minus:
-                cur = int(self.config.get("ui_border_width") or 2)
-                self.config.set("ui_border_width", str(max(1, cur - 1)))
-                self.update(); return
-            if k == Qt.Key.Key_Semicolon:
-                _UI_FONT_OFFSET_ref[0] += 1
-                self.config.set("ui_font_offset", str(_UI_FONT_OFFSET_ref[0]))
-                self._update_cmd_style(); self.update(); return
-            if k == Qt.Key.Key_Apostrophe:
-                _UI_FONT_OFFSET_ref[0] = max(-6, _UI_FONT_OFFSET_ref[0] - 1)
-                self.config.set("ui_font_offset", str(_UI_FONT_OFFSET_ref[0]))
-                self._update_cmd_style(); self.update(); return
-            if k == Qt.Key.Key_Comma:
-                self._cycle_font(-1); return
-            if k == Qt.Key.Key_Period:
-                self._cycle_font(1); return
-            if k == Qt.Key.Key_E:
-                cur = int(self.config.get("help_col_offset") or 0)
-                self.config.set("help_col_offset", str(cur - 20))
-                self.update(); return
-            if k == Qt.Key.Key_R:
-                cur = int(self.config.get("help_col_offset") or 0)
-                self.config.set("help_col_offset", str(cur + 20))
-                self.update(); return
-            if k == Qt.Key.Key_F:
-                flip = not bool(self.config.get("library_flip_mode"))
-                self.config.set("library_flip_mode", flip)
-                self.status_text = f"library: {'pages read' if flip else 'pages remaining'}"
-                QTimer.singleShot(5000, self._clear_status)
-                self.update(); return
+            if k == Qt.Key.Key_Slash:
+                self._open_panel("ScrollReader — Controls Reference", "help")
+                return
+
             return  # eat other unhandled Ctrl combos
 
         # F11 fullscreen (no modifier needed)
@@ -2634,22 +2681,23 @@ class ReaderWidget(QWidget):
         painter.setFont(_ui_font(8))
         painter.drawText(bar_x - 30, bar_y + bar_h - 2, "● REC")
 
-    def _paint_scrollbar(self, painter: QPainter, mr: QRect, scroll: float,
-                          vp: QRect):
-        """Draw a thin scrollbar in the margin."""
+    def _paint_scrollbar(self, painter: QPainter, mr: QRect, scroll: float, vp: QRect):
+        """Draw a scrollbar across the full bottom of the margin."""
         if not self.document or not self.document.lines: return
         total_h = self.document.total_height
         if total_h <= 0: return
         vp_h    = vp.height()
-        track_x = mr.right() - 5 if self._margin_side() == "right" else mr.left() + 2
-        track_y = mr.top() + 2
-        track_h = mr.height() - 4
 
-        painter.fillRect(QRect(track_x, track_y, 3, track_h), AMBER_VERY_DIM)
-        thumb_h = max(12, int(track_h * vp_h / max(total_h, 1)))
-        thumb_y = track_y + int((track_h - thumb_h) * scroll / max(total_h - vp_h, 1))
-        thumb_y = max(track_y, min(track_y + track_h - thumb_h, thumb_y))
-        painter.fillRect(QRect(track_x, thumb_y, 3, thumb_h), AMBER_DIM)
+        # Horizontal scrollbar at bottom of margin
+        bar_y = mr.bottom() - 5
+        bar_w = mr.width()
+        bar_x = mr.left()
+
+        painter.fillRect(QRect(bar_x, bar_y, bar_w, 4), AMBER_VERY_DIM)
+        thumb_w = max(12, int(bar_w * vp_h / max(total_h, 1)))
+        thumb_x = bar_x + int((bar_w - thumb_w) * scroll / max(total_h - vp_h, 1))
+        thumb_x = max(bar_x, min(bar_x + bar_w - thumb_w, thumb_x))
+        painter.fillRect(QRect(thumb_x, bar_y, thumb_w, 4), AMBER_DIM)
 
     def _open_panel(self, title: str, kind: str):
         """Open a named overlay panel."""
@@ -3149,7 +3197,7 @@ class ReaderWidget(QWidget):
 # Library Widget
 # ---------------------------------------------------------------------------
 
-LIBRARY_TABS_ROW1 = ["EDIT META", "SEARCH", "FAVORITES", "SETTINGS"]
+LIBRARY_TABS_ROW1 = ["REFERENCE", "SEARCH", "FAVORITES", "SETTINGS"]
 LIBRARY_TABS_ROW2 = ["READING", "READ", "UNREAD", "ABANDONED"]
 LIBRARY_TABS = LIBRARY_TABS_ROW1 + LIBRARY_TABS_ROW2
 TAB_H          = 38
@@ -3309,6 +3357,15 @@ class LibraryWidget(QWidget):
             }
         """)
         self.status_msg = ""
+        # Library search state
+        self._lib_search_query        = ""
+        self._lib_search_results      = {}
+        self._lib_search_progress     = {}
+        self._lib_search_all_fps      = []
+        self._lib_search_scanning     = False
+        self._lib_search_cursor       = 0
+        self._lib_search_input_active = False
+        self._lib_search_thread: Optional[SearchIndexer] = None
 
     def resizeEvent(self, ev):
         self.cmd.setGeometry(0, self.height() - 26, self.width(), 26)
@@ -3386,13 +3443,58 @@ class LibraryWidget(QWidget):
         elif tab == "READ":
             books = [b for b in books if b["status"] == "read"]
             books.sort(key=lambda b: b.get("title","").lower())
+        elif tab == "REFERENCE":
+            books = self._reference_books()
         return books
 
-    def _all_tags(self) -> list[str]:
-        tags = set()
-        for b in self._all_books():
-            tags.update(b["tags"])
-        return sorted(tags)
+    def _reference_books(self) -> list:
+        """Load books from the reference directory."""
+        ref_dir = self.config.get("reference_dir")
+        if not ref_dir:
+            lib_dir = self.config.get("library_dir") or _default_lib_dir()
+            ref_dir = os.path.join(lib_dir, "reference")
+        if not os.path.exists(ref_dir): return []
+        books = []
+        for fp in sorted(Path(ref_dir).rglob("*.pdf")):
+            fp = str(fp)
+            e  = self.history._entry(fp)
+            tp = e.get("total_pages") or 1
+            an = len(e.get("audio_notes", []))
+            ac = e.get("access_count", 0)
+            last = e.get("last_accessed", 0)
+            days_ago = int((time.time() - last) / 86400) if last else 999
+            books.append({
+                "filepath":    fp,
+                "title":       e.get("title") or Path(fp).stem,
+                "author":      e.get("author") or "",
+                "status":      "reference",
+                "notes":       len(e.get("notes", [])),
+                "bookmarks":   len(e.get("bookmarks", [])),
+                "highlights":  len(e.get("highlights", [])),
+                "audio_notes": an,
+                "access_count": ac,
+                "days_ago":    days_ago,
+                "total_pages": tp,
+                "total":       tp * 40,
+                "line":        0,
+                "tags":        e.get("tags") or [],
+                "favorite":    bool(e.get("favorite")),
+                "color":       _book_color(fp, self.config),
+            })
+        return books
+
+    def _reference_score(self, b: dict) -> float:
+        """Normalize and sum weighted factors for reference box sizing."""
+        def norm(val, mx): return min(1.0, val / max(mx, 1))
+        recency   = norm(max(0, 30 - b["days_ago"]), 30)
+        frequency = norm(b["access_count"], 50)
+        pages     = norm(b["total_pages"], 500)
+        bookmarks = norm(b["bookmarks"], 20)
+        notes     = norm(b["notes"], 20)
+        highlights= norm(b["highlights"], 50)
+        audio     = norm(b["audio_notes"], 10)
+        return (recency + frequency + pages + bookmarks +
+                notes + highlights + audio) / 7.0
 
     # --------------------------------------------------------------- paint
 
@@ -3414,12 +3516,10 @@ class LibraryWidget(QWidget):
 
         if self.tab == "SETTINGS":
             self._paint_settings(painter, 0, content_y, w, content_h)
-        elif self.tab in ("EDIT META", "SEARCH"):
-            painter.setPen(AMBER_DARK)
-            painter.setFont(_ui_font(13))
-            painter.drawText(QRect(0, content_y, w, content_h),
-                             Qt.AlignmentFlag.AlignCenter,
-                             f"{self.tab}\n\n(coming soon)")
+        elif self.tab == "SEARCH":
+            self._paint_library_search(painter, 0, content_y, w, content_h)
+        elif self.tab == "REFERENCE":
+            self._paint_reference(painter, 0, content_y, w, content_h)
         elif self.tab == "READ":
             self._paint_read_tab(painter, 0, content_y, w, content_h)
         else:
@@ -3460,6 +3560,175 @@ class LibraryWidget(QWidget):
         if self._overflow_stack:
             return self._overflow_stack[-1]
         return self._books_for_tab(self.tab)
+
+    def _paint_library_search(self, painter: QPainter, x: int, y: int, w: int, h: int):
+        """Library search view with progressive reveal."""
+        results  = getattr(self, '_lib_search_results', {})
+        progress = getattr(self, '_lib_search_progress', {})
+        query    = getattr(self, '_lib_search_query', "")
+        scanning = getattr(self, '_lib_search_scanning', False)
+        font_b   = _ui_font(10, bold=True)
+        font     = _ui_font(9)
+        font_big = _ui_font(14, bold=True)
+        fm       = QFontMetrics(font_b)
+
+        # Search input bar
+        input_active = getattr(self, '_lib_search_input_active', False)
+        bar_h = 36
+        painter.fillRect(QRect(x, y, w, bar_h), AMBER_VERY_DIM)
+        painter.setPen(AMBER_BRIGHT if input_active else AMBER_DIM)
+        painter.setFont(font_b)
+        cursor = "_" if input_active else ""
+        painter.drawText(x+16, y+24, f"SEARCH: {query}{cursor}")
+        if scanning:
+            painter.setPen(AMBER_DIM)
+            painter.setFont(font)
+            painter.drawText(w-120, y+24, "scanning...")
+        y += bar_h + 4
+
+        # No query yet
+        if not query:
+            painter.setPen(AMBER_DARK)
+            painter.setFont(_ui_font(13))
+            painter.drawText(QRect(x, y, w, h-bar_h),
+                             Qt.AlignmentFlag.AlignCenter,
+                             "Ctrl+Space to search")
+            return
+
+        # Build sorted book list from results
+        all_fps = list(getattr(self, '_lib_search_all_fps', []))
+        if not all_fps: return
+
+        # Score and sort
+        scored = []
+        for fp in all_fps:
+            r = results.get(fp, (0, 0))
+            total_hits = r[0] + r[1]
+            scored.append((fp, total_hits, r[0], r[1]))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        scored = [s for s in scored if s[1] > 0] or scored[:20]
+
+        # Treemap layout — equal sized for simplicity in search
+        if not scored: return
+        n      = len(scored)
+        cols   = max(1, int((w / 200)**0.5 * (h / 150)**0.5))
+        rows   = max(1, (n + cols - 1) // cols)
+        bw     = w // cols
+        bh     = max(80, h // max(rows, 1))
+
+        self._lib_search_rects = []
+        for i, (fp, total, title_h, content_h) in enumerate(scored):
+            bx = x + (i % cols) * bw
+            by = y + (i // cols) * bh
+            rect = QRect(bx, by, bw-2, bh-2)
+
+            # Progressive reveal — fill from bottom based on scan progress
+            scan_frac = progress.get(fp, 0.0)   # 0.0=not scanned, 1.0=done
+            if scan_frac < 1.0:
+                # Desaturated placeholder
+                bg = AMBER_VERY_DIM
+                painter.fillRect(rect, bg)
+                # Fill line moving bottom→top
+                fill_h = int(rect.height() * scan_frac)
+                if fill_h > 0:
+                    fill_rect = QRect(rect.x(), rect.bottom()-fill_h,
+                                      rect.width(), fill_h)
+                    painter.fillRect(fill_rect, AMBER_DARK)
+            else:
+                painter.fillRect(rect, AMBER_DARK)
+
+            selected = (i == getattr(self, '_lib_search_cursor', 0))
+            if selected:
+                painter.fillRect(rect, AMBER_INV_BG)
+                fg = AMBER_INV_FG
+            else:
+                fg = AMBER_BRIGHT
+
+            painter.setPen(_mk_pen(AMBER if not selected else AMBER_BRIGHT, 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect)
+
+            # Text rows
+            e     = self.history._entry(fp)
+            title = (e.get("title") or Path(fp).stem)
+            tp    = e.get("total_pages") or 1
+            n_    = len(e.get("notes", []))
+            b_    = len(e.get("bookmarks", []))
+            hh_   = len(e.get("highlights", []))
+            ac    = e.get("access_count", 0)
+            metar = f"N{n_}B{b_}H{hh_}A{ac}P{tp}"
+
+            painter.setPen(fg)
+            ty = rect.top() + 14
+            painter.setFont(font)
+            painter.drawText(rect.left()+6, ty, metar)
+            ty += 16
+            painter.setFont(font_b)
+            painter.drawText(rect.left()+6, ty,
+                QFontMetrics(font_b).elidedText(title, Qt.TextElideMode.ElideRight, bw-12))
+            if total > 0 and scan_frac >= 1.0:
+                ty += 18
+                painter.setFont(font_big)
+                painter.drawText(rect.left()+6, ty, f"{total} hits")
+
+            self._lib_search_rects.append((rect, fp))
+
+    def _paint_reference(self, painter: QPainter, x: int, y: int, w: int, h: int):
+        """Reference tab — alpha-sorted, sized by weighted score."""
+        books    = self._reference_books()
+        font_b   = _ui_font(9, bold=True)
+        font     = _ui_font(8)
+        VP_AREA  = w * h
+        MIN_AREA = 2000
+
+        if not books:
+            painter.setPen(AMBER_DARK)
+            painter.setFont(_ui_font(13))
+            ref_dir = self.config.get("reference_dir") or os.path.join(
+                self.config.get("library_dir") or _default_lib_dir(), "reference")
+            painter.drawText(QRect(x, y, w, h), Qt.AlignmentFlag.AlignCenter,
+                             f"Reference library\n\n{ref_dir}\n\n(empty or not found)")
+            return
+
+        # Score-based sizing
+        scores = [self._reference_score(b) for b in books]
+        scaled = [max(1, s**0.5) for s in scores]
+        total_s = max(sum(scaled), 1)
+        norm_areas = [(s/total_s)*VP_AREA for s in scaled]
+        visible = [(b, a) for b, a in zip(books, norm_areas) if a >= MIN_AREA]
+        if not visible: visible = [(b, norm_areas[i]) for i, b in enumerate(books)]
+
+        rects = _squarify(visible, QRect(x, y, w, h))
+        self._book_rects = []
+
+        for idx, (b, rect) in enumerate(rects):
+            selected = (idx == self._cursor_idx)
+            interior = AMBER_INV_BG if selected else AMBER_DARK
+            border   = AMBER_BRIGHT if selected else AMBER
+            txt_col  = AMBER_INV_FG if selected else AMBER_BRIGHT
+
+            painter.fillRect(rect, interior)
+            painter.setPen(border)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect)
+
+            days = b["days_ago"]
+            r_str = f"R{days}" if days < 999 else "R—"
+            metar = f"N{b['notes']}B{b['bookmarks']}H{b['highlights']}A{b['access_count']}{r_str}P{b['total_pages']}"
+            texts = [
+                (metar,      font,   txt_col),
+                (b["title"], font_b, txt_col),
+                (b["author"],font,   txt_col),
+            ]
+            ty = rect.top() + 6
+            for txt, fnt, col in texts:
+                if ty + 14 > rect.bottom(): break
+                painter.setFont(fnt); painter.setPen(col)
+                painter.drawText(rect.left()+6, ty+12,
+                    QFontMetrics(fnt).elidedText(txt, Qt.TextElideMode.ElideRight, rect.width()-12))
+                ty += 14
+
+            self._book_rects.append((rect, b["filepath"]))
 
     def _paint_blocks(self, painter: QPainter, x: int, y: int, w: int, h: int):
         self._book_rects    = []
@@ -3996,8 +4265,9 @@ class LibraryWidget(QWidget):
         self.update()
 
     def _cycle_tab(self, direction: int):
-        """Cycle through tabs without needing to press enter."""
+        """Cycle through tabs, cancel search if leaving SEARCH tab."""
         all_tabs = LIBRARY_TABS_ROW1 + LIBRARY_TABS_ROW2
+        old_tab  = self.tab
         if self.tab not in all_tabs:
             self.tab = all_tabs[0]
         else:
@@ -4006,7 +4276,62 @@ class LibraryWidget(QWidget):
         self._overflow_stack = []
         self._cursor_idx     = 0
         self.status_msg      = ""
+        # Cancel search if leaving SEARCH tab
+        if old_tab == "SEARCH" and self.tab != "SEARCH":
+            self._cancel_lib_search()
+        # Auto-activate search input when entering SEARCH tab
+        if self.tab == "SEARCH":
+            self._lib_search_input_active = True
         self._refresh_books()
+        self.update()
+
+    def _cancel_lib_search(self):
+        """Cancel any running library search."""
+        if self._lib_search_thread:
+            self._lib_search_thread.cancel()
+            self._lib_search_thread = None
+        self._lib_search_scanning = False
+
+    def _start_lib_search(self, query: str):
+        """Start async library search."""
+        self._cancel_lib_search()
+        self._lib_search_query    = query
+        self._lib_search_results  = {}
+        self._lib_search_progress = {}
+        self._lib_search_cursor   = 0
+
+        # Collect all library PDFs
+        lib_dir  = self.config.get("library_dir") or _default_lib_dir()
+        recursive = bool(self.config.get("library_recursive"))
+        if recursive:
+            fps = [str(p) for p in Path(lib_dir).rglob("*.pdf")]
+        else:
+            fps = [str(p) for p in Path(lib_dir).glob("*.pdf")]
+        self._lib_search_all_fps = fps
+
+        if not fps or not query: return
+        self._lib_search_scanning = True
+
+        t = SearchIndexer(fps, query)
+        t.result_ready.connect(self._on_search_result)
+        t.scan_done.connect(self._on_search_done)
+        self._lib_search_thread = t
+        t.start()
+
+    def _on_search_result(self, fp: str, title_hits: int, content_hits: int):
+        self._lib_search_results[fp]  = (title_hits, content_hits)
+        self._lib_search_progress[fp] = 1.0
+        # Mark in-progress books as partially scanned
+        for f in self._lib_search_all_fps:
+            if f not in self._lib_search_progress:
+                self._lib_search_progress[f] = 0.0
+        self.update()
+
+    def _on_search_done(self):
+        self._lib_search_scanning = False
+        # Mark all as complete
+        for f in self._lib_search_all_fps:
+            self._lib_search_progress[f] = 1.0
         self.update()
     def keyPressEvent(self, ev: QKeyEvent):
         k    = ev.key()
@@ -4019,6 +4344,51 @@ class LibraryWidget(QWidget):
 
         if k == Qt.Key.Key_Escape:
             self._go_back(); return
+
+        # Search tab input handling
+        if self.tab == "SEARCH":
+            if self._lib_search_input_active:
+                if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    self._lib_search_input_active = False
+                    self.update(); return
+                if k == Qt.Key.Key_Escape:
+                    self._lib_search_input_active = False
+                    self.update(); return
+                if k == Qt.Key.Key_Backspace:
+                    self._lib_search_query = self._lib_search_query[:-1]
+                    self._start_lib_search(self._lib_search_query)
+                    self.update(); return
+                ch = ev.text()
+                if ch and ch.isprintable():
+                    self._lib_search_query += ch
+                    self._start_lib_search(self._lib_search_query)
+                    self.update(); return
+                return
+            elif ctrl and k in (Qt.Key.Key_Space, Qt.Key.Key_Return):
+                self._lib_search_input_active = True
+                self.update(); return
+            # Navigate results with W/S
+            if k in (Qt.Key.Key_Up, Qt.Key.Key_W):
+                self._lib_search_cursor = max(0, self._lib_search_cursor-1)
+                self.update(); return
+            if k in (Qt.Key.Key_Down, Qt.Key.Key_S):
+                n = len(getattr(self, '_lib_search_rects', []))
+                self._lib_search_cursor = min(max(0,n-1), self._lib_search_cursor+1)
+                self.update(); return
+            if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+                rects = getattr(self, '_lib_search_rects', [])
+                idx = self._lib_search_cursor
+                if 0 <= idx < len(rects):
+                    _, fp = rects[idx]
+                    self.hide()
+                    mw = self.parent()
+                    mw.reader.setFocus()
+                    mw.reader.load_document(fp)
+                    # Pre-populate reading search panel
+                    mw.reader._search_query = self._lib_search_query
+                    mw.reader._run_search(self._lib_search_query)
+                    mw.reader._open_search_panel()
+                return
 
         if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
             if time.time() > self._cmd_cooldown:
@@ -4618,6 +4988,83 @@ class GamepadManager:
         return self._hl_start, self._hl_end, self._hl_mode
 
 
+def _search_index_path() -> str:
+    """Path to the search index cache file."""
+    if getattr(sys, 'frozen', False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = str(Path.home() / ".scrollreader")
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, "search_index.json")
+
+
+class SearchIndexer(QThread):
+    """Background thread that searches all library PDFs and emits results."""
+    result_ready = pyqtSignal(str, int, int)   # filepath, title_hits, content_hits
+    scan_done    = pyqtSignal()
+
+    def __init__(self, filepaths: list, query: str):
+        super().__init__()
+        self.filepaths = filepaths
+        self.query     = query.lower().strip()
+        self._cancel   = False
+        self._index    = self._load_index()
+
+    def _load_index(self) -> dict:
+        try:
+            with open(_search_index_path()) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_index(self):
+        try:
+            with open(_search_index_path(), 'w') as f:
+                json.dump(self._index, f)
+        except Exception:
+            pass
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        dirty = False
+        for fp in self.filepaths:
+            if self._cancel: break
+            if not os.path.exists(fp): continue
+
+            mtime = str(os.path.getmtime(fp))
+            cached = self._index.get(fp)
+
+            if cached and cached.get("mtime") == mtime:
+                text = cached.get("text", "")
+            else:
+                # Extract and cache text
+                try:
+                    doc  = fitz.open(fp)
+                    text = " ".join(
+                        page.get_text("text") for page in doc
+                    ).lower()
+                    doc.close()
+                    self._index[fp] = {"mtime": mtime, "text": text}
+                    dirty = True
+                except Exception:
+                    text = ""
+
+            if self._cancel: break
+
+            # Count hits
+            q = self.query
+            fname      = os.path.basename(fp).lower()
+            title_hits = fname.count(q) if q else 0
+            content_hits = text.count(q) if q else 0
+            self.result_ready.emit(fp, title_hits, content_hits)
+
+        if dirty:
+            self._save_index()
+        self.scan_done.emit()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config: Config, history: History, initial_file=None):
         super().__init__()
@@ -4726,20 +5173,17 @@ class MainWindow(QMainWindow):
                     self.reader._panel_back()
                 self.reader._open_search_panel()
                 return
-            if k == Qt.Key.Key_K:
-                self.reader._cycle_swatch(-1)
-                self.update()
-                if self.library.isVisible(): self.library.update()
-                return
-            if k == Qt.Key.Key_L:
+
+        if ctrl:
+            if k == Qt.Key.Key_M:
                 self.reader._cycle_swatch(1)
                 self.update()
                 if self.library.isVisible(): self.library.update()
                 return
-            if k == Qt.Key.Key_Comma:
+            if k == Qt.Key.Key_E:
                 self.reader._cycle_font(-1)
                 self.update(); return
-            if k == Qt.Key.Key_Period:
+            if k == Qt.Key.Key_R:
                 self.reader._cycle_font(1)
                 self.update(); return
 
@@ -4763,7 +5207,12 @@ def main():
             for f in os.listdir(bundled):
                 if f.lower().endswith(('.ttf', '.otf', '.otb')):
                     QFontDatabase.addApplicationFont(os.path.join(bundled, f))
-    config  = Config()
+    config = Config()
+    # Apply saved UI dimensions
+    global TOP_BAR_H, BOTTOM_BAR_H, PANEL_W
+    TOP_BAR_H    = int(config.get("top_bar_h")    or TOP_BAR_H)
+    BOTTOM_BAR_H = int(config.get("bottom_bar_h") or BOTTOM_BAR_H)
+    PANEL_W      = int(config.get("panel_w")      or PANEL_W)
     swatch = config.get("current_swatch") or "amber"
     _apply_swatch(swatch, config)
     _apply_theme(config)
