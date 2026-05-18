@@ -55,7 +55,7 @@ Other
   q / quit              exit
 """
 
-import sys, json, os, re, time
+import sys, json, os, re, time, hashlib
 from pathlib import Path
 from collections import namedtuple
 from typing import Optional, Callable
@@ -66,6 +66,20 @@ from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui import (QPainter, QColor, QFont, QPixmap, QImage,
                           QKeyEvent, QPolygon, QWheelEvent, QMouseEvent,
                           QFontMetrics, QFontDatabase)
+
+try:
+    import pygame
+    HAS_PYGAME = True
+except ImportError:
+    HAS_PYGAME = False
+
+try:
+    import sounddevice as sd
+    import soundfile as sf
+    import numpy as np
+    HAS_AUDIO = True
+except ImportError:
+    HAS_AUDIO = False
 
 # ---------------------------------------------------------------------------
 # Amber phosphor theme
@@ -312,6 +326,7 @@ DEFAULT_CONFIG = {
     "current_swatch":        "amber",
     "current_font_idx":      0,
     "preload_inverted":      True,
+    "start_fullscreen":      True,
     "help_col_offset":       0,
     "library_flip_mode":     False,
     "eager_pages":           2,             # pages rendered synchronously each side of current
@@ -577,6 +592,13 @@ class History:
         self._entry(filepath)["notes"].append({"line": line, "note": note, "timestamp": time.time()})
         self._save()
         return f"note at line {line+1}" + (f": {note}" if note else "")
+
+    def add_audio_note(self, filepath, line, audio_path) -> str:
+        e = self._entry(filepath)
+        if "audio_notes" not in e: e["audio_notes"] = []
+        e["audio_notes"].append({"line": line, "audio_path": audio_path, "timestamp": time.time()})
+        self._save()
+        return f"audio note at line {line+1}"
 
     def add_bookmark(self, filepath, line, page, note) -> str:
         self._entry(filepath)["bookmarks"].append({"line": line, "page": page, "note": note or "", "timestamp": time.time()})
@@ -1301,16 +1323,35 @@ class ReaderWidget(QWidget):
         # ── Margins ────────────────────────────────────────────────────────
         self._paint_margin(painter, scroll, voff, vp, dlines, total, lh, ind_y)
 
+        # ── Scrollbar ──────────────────────────────────────────────────────
+        mr = self._margin_rect()
+        self._paint_scrollbar(painter, mr, scroll, vp)
+
+        # ── Highlight selection overlay ───────────────────────────────────
+        if hasattr(self, 'gamepad_ref') and self.gamepad_ref:
+            hl_start, hl_end, hl_active = self.gamepad_ref.get_hl_range()
+            if hl_active and self.document and self.document.lines:
+                for li in range(hl_start, hl_end + 1):
+                    if 0 <= li < len(self.document.lines):
+                        ly = vp.y() + int(self.document.lines[li].abs_y) - int(scroll) + voff
+                        if vp.top() <= ly <= vp.bottom():
+                            oc = QColor(self._cfg("indicator_color") or "#ffb000")
+                            oc.setAlpha(80)
+                            painter.fillRect(QRect(px, ly, self.document.max_width, lh), oc)
+
         # ── Frame & bars (on top of everything) ───────────────────────────
         self._paint_frame(painter)
         self._paint_top_bar(painter)
         self._paint_bottom_bar(painter)
+        self._paint_vu_meter(painter)
 
         # ── Overlays ──────────────────────────────────────────────────────
         if self.panel and self.panel.get("kind") == "help":
             self._paint_help_panel(painter)
         if self._pending:
             self._paint_confirm(painter)
+        if getattr(self, '_config_popup_open', False):
+            self._paint_config_popup(painter)
 
     # ── Frame & bars ──────────────────────────────────────────────────────
 
@@ -1563,18 +1604,24 @@ class ReaderWidget(QWidget):
         font     = _ui_font(9)
         pw       = mr.width()
         px       = mr.left()
-        py       = mr.top() + 8
+        py       = mr.top()
 
-        # Mode label
-        painter.setPen(AMBER_DIM)
+        # Header background strip
+        painter.fillRect(QRect(px, py, pw, 32), AMBER_VERY_DIM)
+
+        # Mode label centered in header
+        painter.setPen(AMBER_BRIGHT)
         painter.setFont(font_b)
         mode_label = (self._panel_mode or "").upper()
-        painter.drawText(px+8, py+14, mode_label)
-        py += 20
-        # Separator line — drawn clearly below text
-        painter.setPen(_mk_pen(AMBER_VERY_DIM, 1))
-        painter.drawLine(px+4, py, px+pw-4, py)
-        py += 8
+        painter.drawText(QRect(px, py, pw, 32),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         "  " + mode_label)
+
+        # Separator below header
+        py += 32
+        painter.setPen(_mk_pen(AMBER_DARK, self._bw()))
+        painter.drawLine(px, py, px+pw, py)
+        py += 6
 
         if not items:
             painter.setPen(AMBER_DARK)
@@ -2040,6 +2087,23 @@ class ReaderWidget(QWidget):
         k    = ev.key()
         ctrl = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
 
+        # ── Config popup ──────────────────────────────────────────────────────
+        if getattr(self, '_config_popup_open', False):
+            settings = self._config_popup_settings()
+            if k in (Qt.Key.Key_Escape, Qt.Key.Key_Tab):
+                self._config_popup_open = False; self.update()
+            elif k in (Qt.Key.Key_Up, Qt.Key.Key_W):
+                self._config_popup_idx = (self._config_popup_idx - 1) % max(1, len(settings))
+                self.update()
+            elif k in (Qt.Key.Key_Down, Qt.Key.Key_S):
+                self._config_popup_idx = (self._config_popup_idx + 1) % max(1, len(settings))
+                self.update()
+            elif k in (Qt.Key.Key_Right, Qt.Key.Key_D):
+                self._config_popup_adjust(1)
+            elif k in (Qt.Key.Key_Left, Qt.Key.Key_A):
+                self._config_popup_adjust(-1)
+            return
+
         # ── Confirmation overlay ──────────────────────────────────────────
         if self._pending:
             if k == Qt.Key.Key_Y:
@@ -2052,24 +2116,38 @@ class ReaderWidget(QWidget):
         # ── Annotation panel navigation ───────────────────────────────────
         if self._panel_mode:
             # Global mode keys work even from panels
-            if not ctrl and k in (Qt.Key.Key_N, Qt.Key.Key_B, Qt.Key.Key_H,
-                                   Qt.Key.Key_L, Qt.Key.Key_R, Qt.Key.Key_I):
-                pass  # fall through to normal key handling below
-            else:
-                if k in (Qt.Key.Key_Tab, Qt.Key.Key_Escape):
+            if not ctrl:
+                if k == Qt.Key.Key_R:
+                    self._panel_back(); return
+                if k == Qt.Key.Key_L:
                     self._panel_back()
-                elif k in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                    self._panel_select()
-                elif k in (Qt.Key.Key_Down, Qt.Key.Key_Right,
-                           Qt.Key.Key_S, Qt.Key.Key_D):
-                    self._panel_navigate(1)
-                elif k in (Qt.Key.Key_Up, Qt.Key.Key_Left,
-                           Qt.Key.Key_W, Qt.Key.Key_A):
-                    self._panel_navigate(-1)
-                if ctrl and k == Qt.Key.Key_Return:
-                    if time.time() > self._cmd_cooldown:
-                        self._enter_command_mode()
-                return
+                    self.window().show_library(); return
+                if k == Qt.Key.Key_N:
+                    self._open_annot_panel("notes"); return
+                if k == Qt.Key.Key_B:
+                    self._open_annot_panel("bookmarks"); return
+                if k == Qt.Key.Key_H:
+                    self._open_annot_panel("highlights"); return
+                if k == Qt.Key.Key_I:
+                    _pdf_invert_ref[0] = not _pdf_invert_ref[0]
+                    if self.document:
+                        self.history._entry(self.document.filepath)["pdf_invert"] = _pdf_invert_ref[0]
+                        self.history._save()
+                    self.update(); return
+            if k in (Qt.Key.Key_Tab, Qt.Key.Key_Escape):
+                self._panel_back()
+            elif k in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._panel_select()
+            elif k in (Qt.Key.Key_Down, Qt.Key.Key_Right,
+                       Qt.Key.Key_S, Qt.Key.Key_D):
+                self._panel_navigate(1)
+            elif k in (Qt.Key.Key_Up, Qt.Key.Key_Left,
+                       Qt.Key.Key_W, Qt.Key.Key_A):
+                self._panel_navigate(-1)
+            if ctrl and k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                if time.time() > self._cmd_cooldown:
+                    self._enter_command_mode()
+            return
 
         # ── Help/overlay panel ────────────────────────────────────────────
         if self.panel:
@@ -2169,11 +2247,6 @@ class ReaderWidget(QWidget):
             return
 
         # ── Normal reading keys ───────────────────────────────────────────
-        if k == Qt.Key.Key_F11:
-            w = self.window()
-            if w.isFullScreen(): w.showMaximized()
-            else: w.showFullScreen()
-            return
         if k in (Qt.Key.Key_Space, Qt.Key.Key_Return,
                  Qt.Key.Key_Enter, Qt.Key.Key_Down,
                  Qt.Key.Key_S):                          self._step(1)
@@ -2322,6 +2395,195 @@ class ReaderWidget(QWidget):
         self._update_cmd_style()
         self.status_text = f"swatch: {name}"
         QTimer.singleShot(5000, self._clear_status)
+        self.update()
+
+    def _open_search_panel(self):
+        """Open the search panel (gamepad R4 or keyboard)."""
+        if not self.document: return
+        self._search_panel_active = True
+        self._search_results      = getattr(self, '_search_results', [])
+        self._search_pre_line     = self.current_line
+        self._search_cursor       = 0
+        self.update()
+
+    def _open_config_popup(self, kind: str):
+        """Open the 3-row config popup (L3=global, R3=per-book)."""
+        self._config_popup_kind  = kind
+        self._config_popup_idx   = 0
+        self._config_popup_open  = True
+        self.update()
+
+    def _config_popup_settings(self):
+        """Return list of (key, label, type, min, max, step, choices) for config popup."""
+        if getattr(self, '_config_popup_kind', 'global') == 'global':
+            return [
+                ("current_swatch",    "Swatch",        "choice",  0, 0, 1,    SWATCH_NAMES),
+                ("indicator_color",   "Indicator",     "color",   0, 0, 5,    None),
+                ("ui_font_offset",    "Font Size",     "int",    -6, 10, 1,   None),
+                ("ui_border_width",   "Border Width",  "int",     1, 10, 1,   None),
+                ("midpoint",          "Midpoint",      "float", 0.1, 0.9, 0.02, None),
+                ("highlight_height",  "HL Height",     "int",     4, 60, 2,   None),
+                ("highlight_alpha",   "HL Alpha",      "int",     0, 255, 5,  None),
+                ("zoom_mode",         "Zoom Mode",     "choice",  0, 0, 1,    ["fit-width","fit-page","50%","75%","100%"]),
+                ("page_gap",          "Page Gap",      "int",     0, 100, 5,  None),
+                ("library_flip_mode", "Lib Flip",      "bool",    0, 1, 1,    None),
+                ("preload_inverted",  "Preload Inv",   "bool",    0, 1, 1,    None),
+            ]
+        else:
+            fp = self.document.filepath if self.document else None
+            return [
+                ("zoom_fixed",           "Zoom",        "float",  0.3, 5.0, 0.1,  None),
+                ("margin_side",          "Margin",      "choice", 0, 0, 1, ["right","left"]),
+                ("indicator_color",      "Indicator",   "color",  0, 0, 5,   None),
+                ("highlight_alpha",      "HL Alpha",    "int",    0, 255, 5, None),
+            ]
+
+    def _config_popup_adjust(self, direction: int):
+        """Adjust the currently selected config popup value."""
+        settings = self._config_popup_settings()
+        if not settings: return
+        idx = self._config_popup_idx % len(settings)
+        key, label, typ, mn, mx, step, choices = settings[idx]
+        cur = self.config.get(key)
+
+        if typ == "choice" and choices:
+            cur_idx = choices.index(cur) if cur in choices else 0
+            new_idx = (cur_idx + direction) % len(choices)
+            self.config.set(key, choices[new_idx])
+            if key == "current_swatch":
+                _apply_swatch(choices[new_idx], self.config)
+                self._update_cmd_style()
+        elif typ == "bool":
+            self.config.set(key, not bool(cur))
+        elif typ == "int":
+            self.config.set(key, max(int(mn), min(int(mx), int(cur or mn) + direction * int(step))))
+        elif typ == "float":
+            self.config.set(key, round(max(mn, min(mx, float(cur or mn) + direction * step)), 3))
+        elif typ == "color":
+            c = QColor(cur or "#ffb000")
+            h, s, v, _ = c.getHsvF()
+            self.config.set(key, QColor.fromHsvF((h + direction * step/360) % 1.0, s, v).name())
+        self.update()
+
+    def _paint_config_popup(self, painter: QPainter):
+        """Draw the 3-row config popup in lower-right corner."""
+        settings = self._config_popup_settings()
+        if not settings: return
+        idx      = getattr(self, '_config_popup_idx', 0) % len(settings)
+        w, h     = self.width(), self.height()
+        pw       = w // 2
+        row_h    = 32
+        ph       = row_h * 3 + 8
+        px       = w - pw - 4
+        py       = h - BOTTOM_BAR_H - ph - 4
+        font     = _ui_font(10)
+        font_b   = _ui_font(10, bold=True)
+        fm       = QFontMetrics(font)
+
+        # Background
+        painter.fillRect(QRect(px, py, pw, ph), UI_BG)
+        painter.setPen(_mk_pen(AMBER_DARK, self._bw()))
+        painter.drawRect(QRect(px, py, pw, ph))
+
+        rows = []
+        for offset in [-1, 0, 1]:
+            ridx = (idx + offset) % len(settings)
+            rows.append((offset, settings[ridx]))
+
+        for offset, (key, label, typ, mn, mx, step, choices) in rows:
+            ry = py + (offset + 1) * row_h + 4
+            if offset == 0:
+                painter.fillRect(QRect(px+2, ry-2, pw-4, row_h-2), AMBER_VERY_DIM)
+                painter.setPen(AMBER_BRIGHT)
+                painter.setFont(font_b)
+            else:
+                painter.setPen(AMBER_DIM)
+                painter.setFont(font)
+            cur = self.config.get(key)
+            txt = f"{label}   {cur}"
+            painter.drawText(px+10, ry + row_h//2 + fm.height()//2 - 4, txt)
+
+        painter.setPen(AMBER_VERY_DIM)
+        painter.setFont(_ui_font(8))
+        painter.drawText(px+10, py+ph-4, "L-stick navigate · R-stick adjust · B to close")
+
+    def _paint_search_panel(self, painter: QPainter, mr: QRect):
+        """Draw search panel in the margin."""
+        results = getattr(self, '_search_results', [])
+        cursor  = getattr(self, '_search_cursor', 0)
+        query   = getattr(self, '_search_query', "")
+        font_b  = _ui_font(9, bold=True)
+        font    = _ui_font(9)
+        fm      = QFontMetrics(font)
+        px, pw  = mr.left(), mr.width()
+        py      = mr.top() + 4
+
+        # Header
+        painter.fillRect(QRect(px, py, pw, 28), AMBER_VERY_DIM)
+        painter.setPen(AMBER_BRIGHT); painter.setFont(font_b)
+        painter.drawText(px+8, py+20, "SEARCH")
+        py += 32
+
+        # Query display
+        painter.setPen(AMBER_DIM); painter.setFont(font)
+        painter.drawText(px+8, py+16, f"/{query}_")
+        py += 24
+
+        painter.setPen(_mk_pen(AMBER_DARK, self._bw()))
+        painter.drawLine(px, py, px+pw, py)
+        py += 4
+
+        # PREVIOUS / NEXT nav items
+        items = [("PREVIOUS", -1), ("NEXT", 1)] + [(f"L{r+1}", r) for r in results]
+        for i, (label, val) in enumerate(items):
+            if py + 20 > mr.bottom(): break
+            selected = (i == cursor)
+            if selected:
+                painter.fillRect(QRect(px+2, py, pw-4, 20), AMBER_INV_BG)
+                painter.setPen(AMBER_INV_FG)
+            else:
+                painter.setPen(AMBER if i < 2 else AMBER_DIM)
+            painter.setFont(font_b if i < 2 else font)
+            painter.drawText(px+8, py+15, label)
+            py += 20
+
+    def _paint_vu_meter(self, painter: QPainter):
+        """Draw a simple VU meter in the status bar during recording."""
+        if not getattr(self, '_vu_active', False): return
+        level  = _audio_recorder.vu_level
+        w, h   = self.width(), self.height()
+        bar_w  = int(level * 80)
+        bar_x  = w - 100
+        bar_y  = h - BOTTOM_BAR_H + 6
+        bar_h  = BOTTOM_BAR_H - 12
+        painter.fillRect(QRect(bar_x, bar_y, 80, bar_h), AMBER_VERY_DIM)
+        col = QColor("#ff4444") if level > 0.8 else QColor("#ffbb33") if level > 0.4 else QColor("#44ff88")
+        painter.fillRect(QRect(bar_x, bar_y, bar_w, bar_h), col)
+        painter.setPen(AMBER_DIM)
+        painter.setFont(_ui_font(8))
+        painter.drawText(bar_x - 30, bar_y + bar_h - 2, "● REC")
+
+    def _paint_scrollbar(self, painter: QPainter, mr: QRect, scroll: float,
+                          vp: QRect):
+        """Draw a thin scrollbar in the margin."""
+        if not self.document or not self.document.lines: return
+        total_h = self.document.total_height
+        if total_h <= 0: return
+        vp_h    = vp.height()
+        track_x = mr.right() - 5 if self._margin_side() == "right" else mr.left() + 2
+        track_y = mr.top() + 2
+        track_h = mr.height() - 4
+
+        painter.fillRect(QRect(track_x, track_y, 3, track_h), AMBER_VERY_DIM)
+        thumb_h = max(12, int(track_h * vp_h / max(total_h, 1)))
+        thumb_y = track_y + int((track_h - thumb_h) * scroll / max(total_h - vp_h, 1))
+        thumb_y = max(track_y, min(track_y + track_h - thumb_h, thumb_y))
+        painter.fillRect(QRect(track_x, thumb_y, 3, thumb_h), AMBER_DIM)
+
+    def _open_panel(self, title: str, kind: str):
+        """Open a named overlay panel."""
+        self.panel = {"title": title, "kind": kind, "items": []}
+        self._panel_scroll = 0
         self.update()
 
     def _clear_status(self):
@@ -3519,6 +3781,31 @@ class LibraryWidget(QWidget):
             self.update()
         else:
             self.hide()
+            self.parent().reader.setFocus()
+
+    def _move_cursor_by_axis(self, rx: float, ry: float):
+        """Move cursor toward the right-stick direction (focus-follows-joystick)."""
+        if not self._book_rects: return
+        cur_idx = max(0, min(self._cursor_idx, len(self._book_rects)-1))
+        cur_rect, _ = self._book_rects[cur_idx]
+        cx, cy = cur_rect.center().x(), cur_rect.center().y()
+        dx_want, dy_want = rx * 200, ry * 200
+        best_idx, best_score = cur_idx, float('inf')
+        for i, (rect, _) in enumerate(self._book_rects):
+            if i == cur_idx: continue
+            dx = rect.center().x() - cx
+            dy = rect.center().y() - cy
+            dot = dx * dx_want + dy * dy_want
+            if dot > 0:
+                score = (dx**2 + dy**2)**0.5 / max(dot, 0.001)
+                if score < best_score:
+                    best_score = score
+                    best_idx   = i
+        if best_idx != cur_idx:
+            self._cursor_idx = best_idx
+            self.update()
+        else:
+            self.hide()
 
     def _move_cursor(self, dx: int, dy: int):
         """Move cursor by direction in the current grid."""
@@ -3747,11 +4034,440 @@ class LibraryWidget(QWidget):
             return self.parent().reader.document.filepath
         except Exception:
             return None
+# ---------------------------------------------------------------------------
+# Steam Deck / gamepad button mapping (SDL2 indices, configurable)
+# ---------------------------------------------------------------------------
+
+GAMEPAD_DEFAULTS = {
+    "btn_a":      0,    # A — next line / select
+    "btn_b":      1,    # B — back / escape
+    "btn_x":      2,    # X — previous mode
+    "btn_y":      3,    # Y — next mode
+    "btn_l1":     4,    # Left bumper — back
+    "btn_r1":     5,    # Right bumper — back
+    "btn_view":   6,    # View (⧉) — command bar
+    "btn_menu":   7,    # Menu (≡) — help / invert
+    "btn_l3":     8,    # Left stick click — global config popup
+    "btn_r3":     9,    # Right stick click — per-book config popup
+    "btn_dup":    11,   # D-pad up
+    "btn_ddown":  12,   # D-pad down
+    "btn_dleft":  13,   # D-pad left
+    "btn_dright": 14,   # D-pad right
+    "btn_l4":     15,   # L4 grip — notes
+    "btn_l5":     16,   # L5 grip — bookmark
+    "btn_r4":     17,   # R4 grip — search
+    "btn_r5":     18,   # R5 grip — highlight
+    "axis_lx":    0,    # Left stick X
+    "axis_ly":    1,    # Left stick Y
+    "axis_rx":    2,    # Right stick X
+    "axis_ry":    3,    # Right stick Y
+    "axis_lt":    4,    # Left trigger
+    "axis_rt":    5,    # Right trigger
+    "axis_threshold": 0.3,
+    "scroll_repeat_ms": 120,
+    "click_window_ms":  350,
+}
+
+# Mode cycle order
+MODE_CYCLE = ["reading", "library", "bookmarks", "highlights", "notes", "audionotes"]
+
+
+# ---------------------------------------------------------------------------
+# Audio recorder
+# ---------------------------------------------------------------------------
+
+class AudioRecorder:
+    """Records microphone audio to OGG using sounddevice + soundfile."""
+
+    def __init__(self):
+        self.recording   = False
+        self._frames     = []
+        self._samplerate = 44100
+        self._stream     = None
+        self.vu_level    = 0.0   # 0.0–1.0 for VU meter
+
+    def start(self):
+        if not HAS_AUDIO or self.recording: return False
+        self._frames = []
+        self.recording = True
+        try:
+            self._stream = sd.InputStream(
+                samplerate=self._samplerate, channels=1, dtype='float32',
+                callback=self._callback)
+            self._stream.start()
+            return True
+        except Exception:
+            self.recording = False
+            return False
+
+    def _callback(self, indata, frames, time_info, status):
+        self._frames.append(indata.copy())
+        self.vu_level = float(np.abs(indata).max())
+
+    def stop_and_save(self, filepath: str) -> bool:
+        if not self.recording: return False
+        self.recording = False
+        self.vu_level  = 0.0
+        if self._stream:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+        if not self._frames: return False
+        try:
+            audio = np.concatenate(self._frames, axis=0)
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            sf.write(filepath, audio, self._samplerate, format='OGG', subtype='VORBIS')
+            return True
+        except Exception:
+            return False
+
+    def play(self, filepath: str):
+        if not HAS_AUDIO: return
+        try:
+            data, sr = sf.read(filepath)
+            sd.play(data, sr)
+        except Exception:
+            pass
+
+
+_audio_recorder = AudioRecorder()
+
+
+def _audio_dir() -> str:
+    """Directory for audio note files."""
+    if getattr(sys, 'frozen', False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = str(Path.home() / ".scrollreader")
+    return os.path.join(base, "audio")
+
+
+def _audio_path(filepath: str, line: int) -> str:
+    """Generate a unique path for an audio note."""
+    book_hash = hashlib.md5(filepath.encode()).hexdigest()[:8]
+    ts        = int(time.time())
+    return os.path.join(_audio_dir(), f"{book_hash}_L{line}_{ts}.ogg")
+
+
+# ---------------------------------------------------------------------------
+# GamepadManager
+# ---------------------------------------------------------------------------
+
+class GamepadManager:
+    """Polls pygame joystick and translates to ScrollReader actions."""
+
+    def __init__(self, main_window, config):
+        self.mw      = main_window
+        self.config  = config
+        self.joy     = None
+        self._map    = dict(GAMEPAD_DEFAULTS)
+        self._load_map()
+
+        # Multi-click detection per button
+        self._click_times:   dict[int, list] = {}   # btn → [timestamps]
+        self._axis_repeats:  dict[str, float] = {}  # axis → last_fire_time
+        self._held_axes:     dict[str, float] = {}  # axis → current value
+
+        # Highlight selection state
+        self._hl_mode      = False
+        self._hl_start     = 0
+        self._hl_end       = 0
+        self._hl_cursor    = "end"   # "start" or "end"
+
+        # Mode cycle position
+        self._mode_idx     = 0
+
+        if HAS_PYGAME:
+            pygame.init()
+            pygame.joystick.init()
+            self._connect_first()
+
+    def _load_map(self):
+        for k, v in GAMEPAD_DEFAULTS.items():
+            saved = self.config.get(f"gamepad_{k}")
+            if saved is not None:
+                try: self._map[k] = type(v)(saved)
+                except: pass
+
+    def _connect_first(self):
+        if pygame.joystick.get_count() > 0:
+            self.joy = pygame.joystick.Joystick(0)
+            self.joy.init()
+
+    def _btn(self, name: int) -> int:
+        return self._map.get(name, GAMEPAD_DEFAULTS.get(name, -1))
+
+    def poll(self):
+        """Called by QTimer every ~16ms."""
+        if not HAS_PYGAME: return
+        pygame.event.pump()
+
+        if not self.joy:
+            self._connect_first()
+            return
+
+        # Button events
+        for event in pygame.event.get([pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP]):
+            if event.type == pygame.JOYBUTTONDOWN:
+                self._on_button(event.button)
+
+        # Axis state
+        for axis_name, axis_idx in [
+            ("lx", self._map["axis_lx"]), ("ly", self._map["axis_ly"]),
+            ("rx", self._map["axis_rx"]), ("ry", self._map["axis_ry"]),
+            ("lt", self._map["axis_lt"]), ("rt", self._map["axis_rt"]),
+        ]:
+            try: val = self.joy.get_axis(axis_idx)
+            except: val = 0.0
+            self._held_axes[axis_name] = val
+
+        self._process_axes()
+
+    def _on_button(self, btn: int):
+        now = time.time()
+        clicks = self._click_times.setdefault(btn, [])
+        # Prune old clicks outside window
+        window = self._map["click_window_ms"] / 1000.0
+        clicks[:] = [t for t in clicks if now - t < window]
+        clicks.append(now)
+        count = len(clicks)
+
+        m = self._map
+        reader = self.mw.reader
+
+        # Back buttons — all equivalent
+        if btn in (m["btn_b"], m["btn_l1"], m["btn_r1"]):
+            self._go_back(); return
+
+        # Single-click actions (immediate)
+        if btn == m["btn_a"]:
+            self._do_select(); return
+
+        if btn == m["btn_x"]:
+            self._cycle_mode(-1); return
+        if btn == m["btn_y"]:
+            self._cycle_mode(1); return
+
+        if btn == m["btn_view"]:
+            if time.time() > reader._cmd_cooldown:
+                reader._enter_command_mode(); return
+
+        if btn == m["btn_menu"]:
+            reader._open_panel("ScrollReader — Command Reference", "help"); return
+
+        if btn == m["btn_l3"] and count == 1:
+            QTimer.singleShot(int(window*1000)+50,
+                lambda: self._open_config_popup("global") if len(self._click_times.get(m["btn_l3"],[]))==1 else None)
+            return
+
+        if btn == m["btn_r3"] and count == 1:
+            QTimer.singleShot(int(window*1000)+50,
+                lambda: self._open_config_popup("book") if len(self._click_times.get(m["btn_r3"],[]))==1 else None)
+            return
+
+        # Double/triple click actions (fire on exact count after window)
+        if btn == m["btn_l4"]:
+            QTimer.singleShot(int(window*1000)+50, lambda b=btn: self._l4_action())
+            return
+        if btn == m["btn_l5"] and count == 2:
+            QTimer.singleShot(int(window*1000)+50, lambda: self._bookmark_action())
+            return
+        if btn == m["btn_r4"] and count == 2:
+            QTimer.singleShot(int(window*1000)+50, lambda: self._search_action())
+            return
+        if btn == m["btn_r5"]:
+            QTimer.singleShot(int(window*1000)+50, lambda: self._highlight_action())
+            return
+
+    def _l4_action(self):
+        clicks = len(self._click_times.get(self._map["btn_l4"], []))
+        if clicks == 2:
+            self._audio_note_action()
+        elif clicks >= 3:
+            self._text_note_action()
+
+    def _cycle_mode(self, direction: int):
+        reader = self.mw.reader
+        lib    = self.mw.library
+
+        self._mode_idx = (self._mode_idx + direction) % len(MODE_CYCLE)
+        target = MODE_CYCLE[self._mode_idx]
+
+        # Close everything first
+        if lib.isVisible(): lib.hide()
+        if reader._panel_mode: reader._panel_back()
+
+        if target == "reading":
+            reader.setFocus()
+        elif target == "library":
+            self.mw.show_library()
+        elif target == "bookmarks":
+            reader.setFocus()
+            reader._open_annot_panel("bookmarks")
+        elif target == "highlights":
+            reader.setFocus()
+            reader._open_annot_panel("highlights")
+        elif target == "notes":
+            reader.setFocus()
+            reader._open_annot_panel("notes")
+        elif target == "audionotes":
+            reader.setFocus()
+            reader._open_annot_panel("audionotes")
+
+    def _go_back(self):
+        reader = self.mw.reader
+        lib    = self.mw.library
+        if self._hl_mode:
+            self._hl_mode = False
+            reader.update(); return
+        if lib.isVisible():
+            lib.hide(); reader.setFocus()
+            self._mode_idx = 0; return
+        if reader._panel_mode:
+            reader._panel_back()
+            self._mode_idx = 0; return
+
+    def _do_select(self):
+        reader = self.mw.reader
+        lib    = self.mw.library
+        if self._hl_mode:
+            self._save_highlight(); return
+        if lib.isVisible():
+            lib._select_current(); return
+        if reader._panel_mode:
+            reader._panel_select(); return
+        reader._step(1)
+
+    def _process_axes(self):
+        now    = time.time()
+        rms    = self._map["scroll_repeat_ms"] / 1000.0
+        thresh = self._map["axis_threshold"]
+        reader = self.mw.reader
+        lib    = self.mw.library
+
+        ly = self._held_axes.get("ly", 0.0)
+        ry = self._held_axes.get("ry", 0.0)
+        lx = self._held_axes.get("lx", 0.0)
+
+        def _fire(key, val, action):
+            if abs(val) > thresh:
+                last = self._axis_repeats.get(key, 0)
+                if now - last > rms:
+                    self._axis_repeats[key] = now
+                    action(val)
+            else:
+                self._axis_repeats.pop(key, None)
+
+        if lib.isVisible():
+            # Left stick = tab selection
+            _fire("lx", lx, lambda v: lib._cycle_tab(1 if v > 0 else -1))
+            # Right stick = block cursor focus-follows-stick
+            rx = self._held_axes.get("rx", 0.0)
+            _fire("rx", rx, lambda v: lib._move_cursor_by_axis(v, ry))
+        elif self._hl_mode:
+            # Right stick Y = extend end of highlight
+            _fire("ry_hl_end", ry, lambda v: self._hl_extend("end", 1 if v > 0 else -1))
+            # Left stick Y = extend start of highlight
+            _fire("ly_hl_start", ly, lambda v: self._hl_extend("start", 1 if v > 0 else -1))
+        elif reader._panel_mode:
+            _fire("ly", ly, lambda v: reader._panel_navigate(1 if v > 0 else -1))
+        else:
+            # Reading mode — both sticks scroll
+            _fire("ly", ly, lambda v: reader._step(1 if v > 0 else -1))
+            _fire("ry", ry, lambda v: reader._step(1 if v > 0 else -1))
+
+    def _hl_extend(self, which: str, direction: int):
+        reader = self.mw.reader
+        if not reader.document: return
+        total = len(reader.document.lines)
+        if which == "end":
+            self._hl_end = max(self._hl_start, min(total-1, self._hl_end + direction))
+        else:
+            self._hl_start = min(self._hl_end, max(0, self._hl_start + direction))
+        reader.update()
+
+    def _highlight_action(self):
+        reader = self.mw.reader
+        if not reader.document: return
+        clicks = len(self._click_times.get(self._map["btn_r5"], []))
+        if clicks >= 2:
+            if self._hl_mode:
+                self._save_highlight()
+            else:
+                # Enter highlight mode
+                self._hl_mode  = True
+                self._hl_start = reader.current_line
+                self._hl_end   = reader.current_line
+                reader.status_text = "HIGHLIGHT MODE — right stick extend, double R5 to save"
+                reader.update()
+
+    def _save_highlight(self):
+        reader = self.mw.reader
+        if not reader.document: return
+        reader.history.add_highlight(
+            reader.document.filepath,
+            self._hl_start, self._hl_end, "")
+        self._hl_mode = False
+        reader.status_text = f"highlight saved: L{self._hl_start+1}–L{self._hl_end+1}"
+        QTimer.singleShot(3000, reader._clear_status)
+        reader.update()
+
+    def _bookmark_action(self):
+        reader = self.mw.reader
+        if not reader.document: return
+        reader.history.add_bookmark(reader.document.filepath, reader.current_line, "")
+        reader.status_text = f"bookmark saved: L{reader.current_line+1}"
+        QTimer.singleShot(3000, reader._clear_status)
+        reader.update()
+
+    def _text_note_action(self):
+        reader = self.mw.reader
+        if not reader.document: return
+        # Open command bar pre-filled for note
+        reader._enter_command_mode()
+        reader.cmd.setText(":nl ")
+        reader.cmd.setCursorPosition(len(reader.cmd.text()))
+
+    def _audio_note_action(self):
+        reader = self.mw.reader
+        if not reader.document or not HAS_AUDIO: return
+        if _audio_recorder.recording:
+            # Stop and save
+            path = _audio_path(reader.document.filepath, reader.current_line)
+            if _audio_recorder.stop_and_save(path):
+                reader.history.add_audio_note(
+                    reader.document.filepath,
+                    reader.current_line, path)
+                reader.status_text = "audio note saved"
+                QTimer.singleShot(3000, reader._clear_status)
+                reader._vu_active = False
+                reader.update()
+        else:
+            # Start recording
+            if _audio_recorder.start():
+                reader.status_text = "● REC"
+                reader._vu_active = True
+                reader.update()
+
+    def _search_action(self):
+        reader = self.mw.reader
+        if not reader.document: return
+        reader._open_search_panel()
+
+    def _open_config_popup(self, kind: str):
+        self.mw.reader._open_config_popup(kind)
+
+    def get_hl_range(self):
+        return self._hl_start, self._hl_end, self._hl_mode
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config: Config, history: History, initial_file=None):
         super().__init__()
         self.setWindowTitle("ScrollReader")
         self.resize(1100, 820)
+        if config.get("start_fullscreen") in (True, "true", "True", "1", None):
+            QTimer.singleShot(0, self.showFullScreen)
         self.setStyleSheet(f"background: {config.get('background_color')};")
         self.reader = ReaderWidget(config, history)
         self.setCentralWidget(self.reader)
@@ -3762,6 +4478,19 @@ class MainWindow(QMainWindow):
         self.library.hide()
         self.library.open_book.connect(self.reader.load_document)
 
+        # Gamepad
+        self.gamepad = GamepadManager(self, config)
+        self.reader.gamepad_ref = self.gamepad   # for HL overlay
+        if HAS_PYGAME:
+            self._gp_timer = QTimer(self)
+            self._gp_timer.timeout.connect(self.gamepad.poll)
+            self._gp_timer.start(16)   # ~60Hz
+
+        # VU meter refresh during recording
+        self._vu_timer = QTimer(self)
+        self._vu_timer.timeout.connect(self._vu_tick)
+        self._vu_timer.start(80)
+
         load_path = initial_file
         if not load_path and config.get("reopen_last"):
             last = history.last_file()
@@ -3770,6 +4499,10 @@ class MainWindow(QMainWindow):
         if load_path:
             path = load_path
             QTimer.singleShot(80, lambda: self.reader.load_document(path))
+
+    def _vu_tick(self):
+        if getattr(self.reader, '_vu_active', False):
+            self.reader.update()
 
     def show_library(self):
         try:
