@@ -186,10 +186,10 @@ SWATCHES = {
     "gold":       {"bg": "#0a0800", "primary": "#ffd700", "bright": "#ffec66",
                    "dim": "#997f00", "dark": "#554500", "very_dim": "#221c00",
                    "inv_bg": "#ffd700", "inv_fg": "#000000"},
-    "marathon":   {"bg": "#2233cc", "primary": "#ffffff", "bright": "#ffffff",
+    "blue_lcd":   {"bg": "#2233cc", "primary": "#ffffff", "bright": "#ffffff",
                    "dim": "#aabbff", "dark": "#6677dd", "very_dim": "#3344aa",
                    "inv_bg": "#ffffff", "inv_fg": "#2233cc"},
-    "neon":       {"bg": "#ccff00", "primary": "#111111", "bright": "#000000",
+    "green_lcd":       {"bg": "#ccff00", "primary": "#111111", "bright": "#000000",
                    "dim": "#445500", "dark": "#aabb00", "very_dim": "#bbdd00",
                    "inv_bg": "#111111", "inv_fg": "#ccff00"},
     "mono_dark":  {"bg": "#000000", "primary": "#ffffff", "bright": "#ffffff",
@@ -303,6 +303,8 @@ DEFAULT_CONFIG = {
     "current_swatch":        "amber",
     "current_font_idx":      0,
     "preload_inverted":      True,
+    "help_col_offset":       0,
+    "library_flip_mode":     False,
     "eager_pages":           2,             # pages rendered synchronously each side of current
 }
 
@@ -1373,9 +1375,10 @@ class ReaderWidget(QWidget):
             elif self.status_text:
                 ref = self.status_text
             else:
-                ref = ("SPC/↓/S NEXT   ↑/TAB/W BACK   A/D or ←/→ PAGE   "
-                       "I INVERT   CTRL+ENTER CMD   CTRL+L LIB   "
-                       "CTRL+N/B/H PANELS   CTRL+O/P SWATCH   SN/SP/SF/SL SEARCH")
+                ref = ("SPC/↓/S NEXT   ↑/TAB/W BACK   A/D PAGE   "
+                       "L LIB   N/B/H PANELS   I INVERT   ?  HELP   "
+                       "gg TOP   G BOTTOM   CTRL+K/L SWATCH   CTRL+O/P IND.COLOR   "
+                       "SN/SP/SF/SL SEARCH   CC REPEAT   = UNDO")
             painter.drawText(6, h - 8, ref)
 
     # ── Margin indicators ─────────────────────────────────────────────────
@@ -1575,6 +1578,15 @@ class ReaderWidget(QWidget):
             painter.drawLine(px+4, py+item_h, px+pw-4, py+item_h)
             py += item_h
 
+    def _cycle_indicator_color(self, delta_deg: int):
+        """Shift the indicator (main line) color by delta_deg on the HSV hue wheel."""
+        cur = QColor(self.config.get("indicator_color") or "#ffb000")
+        h, s, v, _ = cur.getHsvF()
+        new_h = (h + delta_deg / 360.0) % 1.0
+        new_color = QColor.fromHsvF(new_h, max(0.6, s), max(0.7, v))
+        self.config.set("indicator_color", new_color.name())
+        self.update()
+
     def _open_annot_panel(self, mode: str) -> Optional[str]:
         if not self.document: return "no document open"
         # Toggle: calling same mode again closes panel
@@ -1726,6 +1738,35 @@ class ReaderWidget(QWidget):
             ("open <path>",   "Open a PDF file. Supports ~ expansion."),
             ("",              "Example:  open ~/books/mybook.pdf"),
         ]),
+        ("KEYS — READING", None, [
+            ("Space / ↓ / S / Enter",   "Advance one line"),
+            ("↑ / Tab / Backspace / W", "Back one line"),
+            ("→ / D / PageDown",        "Page forward"),
+            ("← / A / PageUp",          "Page back"),
+            ("gg",                      "Jump to top of document"),
+            ("G  (Shift+G)",            "Jump to bottom of document"),
+            ("=",                       "Undo last move (50-step history)"),
+            ("F11",                     "Toggle fullscreen"),
+            ("Ctrl+Space / Ctrl+Enter", "Open command bar"),
+        ]),
+        ("KEYS — MODE TOGGLES  (work everywhere, not in command bar)", None, [
+            ("L",   "Toggle library  (L again to close)"),
+            ("N",   "Toggle notes panel  (N again to close)"),
+            ("B",   "Toggle bookmarks panel"),
+            ("H",   "Toggle highlights panel"),
+            ("I",   "Toggle PDF colour inversion  (per-book, remembered)"),
+            ("?",   "This help panel"),
+        ]),
+        ("KEYS — CTRL SHORTCUTS", None, [
+            ("Ctrl+K / Ctrl+L",   "Cycle colour swatch backward / forward"),
+            ("Ctrl+O / Ctrl+P",   "Cycle indicator colour through HSV wheel"),
+            ("Ctrl+[ / Ctrl+]",   "Highlight band height ±2px"),
+            ("Ctrl+= / Ctrl+-",   "UI border width ±1px"),
+            ("Ctrl+; / Ctrl+'",   "UI font size ±1"),
+            ("Ctrl+, / Ctrl+.",   "Cycle font backward / forward"),
+            ("Ctrl+E / Ctrl+R",   "Help panel column offset ±20px"),
+            ("Ctrl+F",            "Flip library sizing mode"),
+        ]),
         ("NAVIGATION COMMANDS", None, [
             ("gl<N>  /  gotoline<N>",    "Jump to line N"),
             ("gp<N>  /  gotopage<N>",    "Jump to page N"),
@@ -1734,85 +1775,67 @@ class ReaderWidget(QWidget):
             ("pb[N]  /  pageback[N]",    "Go back N pages (default 1)"),
             ("pf[N]  /  pageforward[N]", "Go forward N pages (default 1)"),
         ]),
+        ("SEARCH", None, [
+            ("sn <term>",   "Search next occurrence from current line"),
+            ("sp <term>",   "Search previous"),
+            ("sf <term>",   "Search first in document"),
+            ("sl <term>",   "Search last in document"),
+            ("cc",          "Repeat last command (great for stepping through matches)"),
+            ("",            ""),
+            ("", "Use ;;phrase;; for multi-word search:  sn ;;eternal return;;"),
+            ("", "Results show [wrapped] when the search loops around the document."),
+        ]),
         ("RANGE SYNTAX", None, [
-            ("", "Many commands accept a range specifier appended directly to the command:"),
-            ("",                    ""),
+            ("", "Many commands accept a range specifier:"),
+            ("", ""),
             ("<cmd>",               "Current line or page"),
             ("<cmd><N>",            "Line/page N  (absolute)"),
-            ("<cmd><A>-<B>",        "Lines/pages A through B  (absolute, A must be ≤ B)"),
-            ("<cmd><fwd>[;<back>]", "fwd lines/pages forward, back lines/pages back from current"),
-            ("",                    ""),
-            ("", "For hl / hp only, a single number always means forward:"),
+            ("<cmd><A>-<B>",        "Lines/pages A through B"),
+            ("<cmd><fwd>[;<back>]", "fwd forward, back backward from current"),
+            ("", ""),
             ("hl5",       "→  highlight current + next 5 lines"),
             ("hl5;3",     "→  highlight back 3, current, forward 5"),
-            ("hl;3",      "→  highlight back 3 + current"),
             ("hl40-89",   "→  highlight lines 40–89  (absolute)"),
-            ("",          ""),
-            ("", "For all other ranged commands, a single number is absolute position:"),
-            ("rl40",      "→  remove annotations at line 40"),
-            ("rl5;3",     "→  remove fwd 5 back 3 from current line"),
-            ("rp4-10",    "→  remove annotations on pages 4–10"),
-        ]),
-        ("NOTES — ;;text;;", None, [
-            ("", "Any command that takes an annotation or revision note uses the ;; delimiter:"),
-            ("", "Append ;;your note here;; to the end of any annotating command."),
-            ("nl;;text;;",       "Note at current line"),
-            ("nl33;;text;;",     "Note at line 33"),
-            ("bl;;text;;",       "Bookmark current line with note"),
-            ("hl5;;text;;",      "Highlight + note"),
         ]),
         ("ANNOTATION COMMANDS", None, [
-            ("nl[N][;;note;;]",              "Add note at current line or line N"),
-            ("bl[range][;;note;;]",          "Bookmark a line"),
-            ("bp[range][;;note;;]",          "Bookmark a page"),
-            ("hl[range][;;note;;]",          "Highlight lines  (same range syntax as everything else)"),
-            ("hp[range][;;note;;]",          "Highlight pages"),
-            ("", ""),
-            ("", "Examples:"),
-            ("hl",        "→  highlight current line"),
-            ("hl5",       "→  highlight line 5"),
-            ("hl40-89",   "→  highlight lines 40–89"),
-            ("hl5;3",     "→  highlight fwd 5, back 3 from current"),
-        ]),
-        ("ANNOTATION PANELS", None, [
-            ("sn  /  shownotes",       "Open notes panel"),
-            ("sb  /  showbookmarks",   "Open bookmarks panel"),
-            ("sh  /  showhighlights",  "Open highlights panel"),
-            ("",                       "Click any item to jump to that line. Esc to close."),
+            ("nl[N][;;note;;]",     "Add note at current line or line N"),
+            ("bl[range][;;note;;]", "Bookmark a line"),
+            ("hl[range][;;note;;]", "Highlight lines"),
+            ("vn / vb / vh",        "Open notes / bookmarks / highlights panel"),
+            ("",                    ""),
+            ("", "In the panel: ↑↓ navigate, Space/Enter select, Tab/Esc back to reading position"),
         ]),
         ("REMOVE COMMANDS", None, [
-            ("", "All remove commands show a y/n confirmation prompt before executing."),
-            ("", "All accept an optional ;;reason;; which is logged to history."),
+            ("", "All remove commands show a y/n confirmation. Optional ;;reason;; logged to history."),
             ("", ""),
-            ("rl[range][;;reason;;]",   "Remove all annotations touching a line range"),
-            ("rp[range][;;reason;;]",   "Remove all annotations touching a page range"),
-            ("rb[range][;;reason;;]",   "Remove bookmarks only"),
-            ("rn[range][;;reason;;]",   "Remove notes only"),
-            ("rh[range][;;reason;;]",   "Remove highlights only"),
-            ("removeall[;;reason;;]",   "Remove ALL annotations for this book"),
-            ("removeall+",              "Wipe ALL stored data for this book (no reason logged)"),
-            ("", ""),
-            ("", "Partial overlap rule: if a remove range touches any part of an annotation,"),
-            ("", "the entire annotation is deleted."),
+            ("rl[range]",   "Remove all annotations touching a line range"),
+            ("rp[range]",   "Remove all annotations touching a page range"),
+            ("rb[range]",   "Remove bookmarks only"),
+            ("rn[range]",   "Remove notes only"),
+            ("rh[range]",   "Remove highlights only"),
+            ("removeall",   "Remove ALL annotations for this book"),
+            ("removeall+",  "Wipe ALL stored data for this book"),
         ]),
         ("EXPORT COMMANDS", None, [
-            ("", "Exports write Markdown files. Two modes (set via  set export_mode <mode>):"),
-            ("",          "  timestamped  — new file per export: title_YYYYMMDD_HHMMSS.md"),
-            ("",          "  running      — appends to title_running.md"),
-            ("", "Default save location: same folder as the PDF. Change with  set export_dir <path>"),
+            ("", "Two modes:  timestamped (new file per export)  or  running (appends to one file)"),
+            ("", "Set with:  set export_mode timestamped  or  set export_mode running"),
             ("", ""),
-            ("e",                     "Export all annotations"),
-            ("el[range]",             "Export by line range"),
-            ("ep[range]",             "Export by page range"),
-            ("eb[range]",             "Export bookmarks only"),
-            ("en[range]",             "Export notes only"),
-            ("eh[range]",             "Export highlights only"),
+            ("e",           "Export all annotations"),
+            ("el[range]",   "Export by line range"),
+            ("ep[range]",   "Export by page range"),
+            ("eb[range]",   "Export bookmarks only"),
+            ("en[range]",   "Export notes only"),
+            ("eh[range]",   "Export highlights only"),
+        ]),
+        ("LIBRARY", None, [
+            ("lib",                         "Open library browser"),
+            ("fliplib",                     "Toggle sizing: pages remaining ↔ pages read"),
+            ("set library_dir <path>",      "Set library scan folder"),
+            ("set library_recursive true",  "Scan subdirectories"),
             ("", ""),
-            ("", "Examples:"),
-            ("el40-89",               "→  export all annotations on lines 40–89"),
-            ("ep2-5",                 "→  export annotations on pages 2–5"),
-            ("eb45",                  "→  export bookmark at line 45"),
-            ("el5;3",                 "→  export fwd 5 back 3 from current line"),
+            ("", "Library block size = proportional to unread pages (or pages read in flip mode)."),
+            ("", "Overflow cell shows: +12/8U2R1D1A  (U=unread R=reading D=done A=abandoned)"),
+            ("", "Navigate: W/S or ↑/↓ move cursor, A/D or ←/→ cycle tabs, Space/Enter opens book"),
         ]),
         ("ZOOM", None, [
             ("zoom fit-width",   "Fit page width to window  (default)"),
@@ -1820,58 +1843,45 @@ class ReaderWidget(QWidget):
             ("zoom 50%",         "Small fixed zoom"),
             ("zoom 75%",         "Medium fixed zoom"),
             ("zoom 100%",        "Large fixed zoom"),
-            ("zoom cycle",       "Step through zoom modes in order"),
+            ("zoom cycle",       "Step through zoom modes"),
         ]),
         ("BOOK METADATA", None, [
             ("bookinfo",                     "Show title, author, status, progress, annotation counts"),
-            ("setmeta title <value>",        "Set book title"),
-            ("setmeta author <value>",       "Set author"),
-            ("setmeta status <value>",       "Set status: unread / reading / read / abandoned"),
-            ("setmeta rating <1-5>",         "Set rating"),
-            ("setmeta tags <a,b,c>",         "Set comma-separated tags"),
+            ("setm title <value>",           "Set book title  (alias: setmeta)"),
+            ("setm author <value>",          "Set author"),
+            ("setm status <value>",          "Status: unread / reading / read / abandoned"),
+            ("setm rating <1-5>",            "Set rating"),
+            ("fav  /  unfav",                "Add/remove from favourites"),
         ]),
-        ("PER-BOOK DISPLAY OVERRIDES", None, [
-            ("bookset <key> <value>",  "Override a display setting for the current book only."),
-            ("", ""),
-            ("bookset indicator_color #ff4444",      "Current-line indicator colour"),
-            ("bookset highlight_alpha 35",           "Opacity of current-line highlight band (0–255)"),
-            ("bookset highlight_height 20",          "Height in pixels of the highlight band"),
-            ("bookset highlight_offset 0",           "Vertical nudge of highlight band (negative = up)"),
-            ("bookset saved_highlight_color #4488ff","Colour of saved highlights"),
-            ("bookset saved_highlight_alpha 45",     "Opacity of saved highlights"),
-            ("bookset bookmark_color #ffaa00",       "Colour of bookmark margin markers"),
-            ("bookset note_color #44ff88",           "Colour of note margin dots"),
+        ("COLOUR & DISPLAY", None, [
+            ("Ctrl+K / Ctrl+L",              "Cycle swatch backward / forward"),
+            ("Ctrl+O / Ctrl+P",              "Cycle indicator colour through HSV wheel"),
+            ("ms  /  swapmargin",            "Swap annotation margin side (left ↔ right)"),
+            ("set theme_primary #ffbb33",    "Set primary UI colour"),
+            ("set theme_bg #000000",         "Set background colour"),
+            ("set indicator_color #ffb000",  "Set main line indicator colour"),
+            ("set preload_inverted true",     "Pre-render inverted page cache (default true)"),
         ]),
         ("GLOBAL CONFIG", None, [
-            ("set <key> <value>",    "Change a global config value (saved to ~/.scrollreader/config.json)"),
-            ("showconfig",           "Print all current config values to the status bar"),
+            ("set <key> <value>",            "Change a global config value"),
+            ("showconfig",                   "Print all current config values"),
             ("", ""),
-            ("set reopen_last true/false",       "Auto-reopen last book on launch"),
-            ("set midpoint 0.42",                "Screen fraction where indicator locks (0.0–1.0)"),
-            ("set zoom_mode fit-width",          "Default zoom mode"),
-            ("set background_color #1a1a1a",     "Background colour"),
-            ("set statusbar_color #111111",      "Status bar background"),
-            ("set statusbar_text_color #888888", "Status bar text colour"),
-            ("set page_gap 30",                  "Pixel gap between PDF pages"),
-            ("set export_dir ~/exports",         "Default export directory (empty = PDF folder)"),
-            ("set export_mode timestamped",      "Export mode: timestamped or running"),
+            ("set reopen_last true/false",   "Auto-reopen last book on launch"),
+            ("set midpoint 0.42",            "Indicator lock position (0.0–1.0)"),
+            ("set page_gap 30",              "Pixel gap between PDF pages"),
+            ("set export_dir ~/exports",     "Default export directory"),
+            ("set help_col_offset 0",        "Help panel column offset (adjust with Ctrl+E/R)"),
         ]),
         ("FILES", None, [
-            ("~/.scrollreader/config.json",   "Global configuration"),
-            ("~/.scrollreader/history.json",  "Per-book history, annotations, and metadata"),
-            ("", "These are plain JSON — safe to edit in any text editor."),
+            ("~/.scrollreader/config.json",  "Global configuration"),
+            ("~/.scrollreader/history.json", "Per-book history, annotations, and metadata"),
+            ("fonts/",                       "Drop .ttf/.otf/.otb here to add fonts"),
+            ("", "All data files are plain JSON — safe to edit in any text editor."),
         ]),
         ("PRINT", None, [
-            ("pd  /  printdialog",    "Open system print dialog for the whole document"),
-            ("pp[range]  /  printpage[range]",  "Print pages (same range syntax as everything else)"),
-            ("", ""),
-            ("pp",        "→  print current page"),
-            ("pp5",       "→  print page 5"),
-            ("pp2-8",     "→  print pages 2–8"),
-            ("pp3;1",     "→  print current page, fwd 3, back 1"),
-            ("pd",        "→  open print dialog (lets you choose printer, copies, etc.)"),
-            ("", ""),
-            ("", "Requires PyQt6.QtPrintSupport to be installed."),
+            ("pd  /  printdialog",           "Open system print dialog"),
+            ("pp[range]",                    "Print pages (same range syntax as everything else)"),
+            ("", "Requires PyQt6.QtPrintSupport."),
         ]),
         ("OTHER", None, [
             ("help  /  man  /  ?",  "Show this help panel"),
@@ -1998,14 +2008,14 @@ class ReaderWidget(QWidget):
         if ctrl:
             if k in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self._enter_command_mode(); return
+            if k == Qt.Key.Key_K:
+                self._cycle_swatch(-1); return
             if k == Qt.Key.Key_L:
-                self.window().show_library(); return
-            if k == Qt.Key.Key_N:
-                self._open_annot_panel("notes"); return
-            if k == Qt.Key.Key_B:
-                self._open_annot_panel("bookmarks"); return
-            if k == Qt.Key.Key_H:
-                self._open_annot_panel("highlights"); return
+                self._cycle_swatch(1); return
+            if k == Qt.Key.Key_O:
+                self._cycle_indicator_color(-5); return
+            if k == Qt.Key.Key_P:
+                self._cycle_indicator_color(5); return
             if k == Qt.Key.Key_BracketLeft:
                 cur = int(self._cfg("highlight_height") or 20)
                 self.config.set("highlight_height", str(max(4, cur - 2)))
@@ -2034,10 +2044,20 @@ class ReaderWidget(QWidget):
                 self._cycle_font(-1); return
             if k == Qt.Key.Key_Period:
                 self._cycle_font(1); return
-            if k == Qt.Key.Key_O:
-                self._cycle_swatch(-1); return
-            if k == Qt.Key.Key_P:
-                self._cycle_swatch(1); return
+            if k == Qt.Key.Key_E:
+                cur = int(self.config.get("help_col_offset") or 0)
+                self.config.set("help_col_offset", str(cur - 20))
+                self.update(); return
+            if k == Qt.Key.Key_R:
+                cur = int(self.config.get("help_col_offset") or 0)
+                self.config.set("help_col_offset", str(cur + 20))
+                self.update(); return
+            if k == Qt.Key.Key_F:
+                flip = not bool(self.config.get("library_flip_mode"))
+                self.config.set("library_flip_mode", flip)
+                self.status_text = f"library: {'pages read' if flip else 'pages remaining'}"
+                QTimer.singleShot(5000, self._clear_status)
+                self.update(); return
             return  # eat other unhandled Ctrl combos
 
         # F11 fullscreen (no modifier needed)
@@ -2063,7 +2083,6 @@ class ReaderWidget(QWidget):
         elif k in (Qt.Key.Key_PageUp, Qt.Key.Key_Left,
                    Qt.Key.Key_A):   self._step(-self._lines_per_screen())
         elif k == Qt.Key.Key_I:
-            # Toggle per-book PDF inversion
             _pdf_invert_ref[0] = not _pdf_invert_ref[0]
             if self.document:
                 self.history._entry(self.document.filepath)["pdf_invert"] = _pdf_invert_ref[0]
@@ -2075,11 +2094,43 @@ class ReaderWidget(QWidget):
                         if self.document.page_pixmaps_inv[pn] is None:
                             self.document.page_pixmaps_inv[pn] = self.document.render_page_inv(pn)
             self.update()
-        elif k == Qt.Key.Key_0:
+        elif k == Qt.Key.Key_Equal:
+            # Undo last movement
             prev = self._pop_history()
             if prev is not None and self.document:
                 self.current_line = max(0, min(len(self.document.lines)-1, prev))
                 self.update()
+        elif k == Qt.Key.Key_Question:
+            # Help panel
+            self._open_panel("ScrollReader — Command Reference", "help")
+        elif k == Qt.Key.Key_G:
+            if ev.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                # G = bottom of document
+                if self.document and self.document.lines:
+                    self._push_history(self.current_line)
+                    self.current_line = len(self.document.lines) - 1
+                    self.history.set_line(self.document.filepath, self.current_line)
+                    self.update()
+            else:
+                # g — wait for second g (gg = top)
+                if getattr(self, '_g_pending', False):
+                    self._g_pending = False
+                    if self.document and self.document.lines:
+                        self._push_history(self.current_line)
+                        self.current_line = 0
+                        self.history.set_line(self.document.filepath, self.current_line)
+                        self.update()
+                else:
+                    self._g_pending = True
+                    QTimer.singleShot(500, lambda: setattr(self, '_g_pending', False))
+        elif k == Qt.Key.Key_L:
+            self.window().show_library()
+        elif k == Qt.Key.Key_N:
+            self._open_annot_panel("notes")
+        elif k == Qt.Key.Key_B:
+            self._open_annot_panel("bookmarks")
+        elif k == Qt.Key.Key_H:
+            self._open_annot_panel("highlights")
 
     def wheelEvent(self, ev: QWheelEvent):
         delta = ev.angleDelta().y()
@@ -2240,6 +2291,11 @@ class ReaderWidget(QWidget):
             self.config.set("margin_side", side)
             if self.document: self._rerender()
             return f"margin: {side}"
+
+        if cmd in ("fliplib", "flip"):
+            flip = not bool(self.config.get("library_flip_mode"))
+            self.config.set("library_flip_mode", flip)
+            return f"library sizing: {'pages read' if flip else 'pages remaining'}"
         if cmd in ("help","man","?"):        return self._open_panel("ScrollReader — Command Reference", "help")
 
         # Search commands
@@ -2322,13 +2378,21 @@ class ReaderWidget(QWidget):
         else:
             indices = range(total)
 
+        wrapped = False
         for i in indices:
             if pattern.search(lines[i].text):
+                if direction in ("sn", "sp"):
+                    # Detect if we wrapped around
+                    if direction == "sn" and i <= cur:
+                        wrapped = True
+                    elif direction == "sp" and i >= cur:
+                        wrapped = True
                 self._push_history(self.current_line)
                 self.current_line = i
                 self.history.set_line(self.document.filepath, i)
                 self.update()
-                return f"found '{term}' at line {i+1}"
+                wrap_note = "  [wrapped]" if wrapped else ""
+                return f"found '{term}' at line {i+1}{wrap_note}"
 
         return f"'{term}' not found"
 
@@ -2613,9 +2677,15 @@ def _scan_pdfs(directory: str, recursive: bool = False) -> list[str]:
 
 
 def _default_lib_dir() -> str:
+    """Default library dir: next to exe on Windows, ~/library on Linux."""
+    if getattr(sys, 'frozen', False):
+        # Running as exe
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
     if sys.platform.startswith("win"):
-        return str(Path.home() / "Downloads")
-    return str(Path.home())
+        return base
+    return str(Path.home() / "library")
 
 
 def _squarify(books, weights, x, y, w, h, padding, min_w, min_h):
@@ -2893,12 +2963,15 @@ class LibraryWidget(QWidget):
         VP_AREA  = VP_W * VP_H
 
         def _unread(b):
-            tp = max(b["total_pages"], 1)
+            tp   = max(b["total_pages"], 1)
+            read = round(b["line"] / max(b["total"], 1) * tp)
+            flip = bool(self.config.get("library_flip_mode"))
             if self.tab == "READ":
-                # Read books: size by total pages (all read, so remaining = 0)
-                return tp
-            # All other tabs: size by remaining (unread) pages
-            return max(1, tp - round(b["line"] / max(b["total"], 1) * tp))
+                return tp  # read books always use total
+            if flip:
+                return max(1, read)   # flip: size by pages READ
+            else:
+                return max(1, tp - read)  # normal: size by pages REMAINING
 
         unread      = [_unread(b) for b in books]
         # Use fourth-root scaling for more pronounced size variation
@@ -2956,6 +3029,16 @@ class LibraryWidget(QWidget):
                     for col in range(rect.left()+4, rect.right()-4, cw):
                         painter.drawText(col, row+ch-2, "X")
                 label = f"+{len(ov_books)} more"
+                cats = {"unread": 0, "reading": 0, "read": 0, "abandoned": 0}
+                for b in ov_books:
+                    s = b.get("status", "unread")
+                    if s in cats: cats[s] += 1
+                cat_str = ""
+                if cats["unread"]:    cat_str += f"{cats['unread']}U"
+                if cats["reading"]:   cat_str += f"{cats['reading']}R"
+                if cats["read"]:      cat_str += f"{cats['read']}D"
+                if cats["abandoned"]: cat_str += f"{cats['abandoned']}A"
+                label = f"+{len(ov_books)}/{cat_str}" if cat_str else f"+{len(ov_books)}"
                 painter.fillRect(QRect(rect.left(), rect.bottom()-18, rect.width(), 18), UI_BG)
                 painter.setPen(AMBER_BRIGHT if selected else AMBER)
                 painter.setFont(_ui_font(9, bold=True))
@@ -3146,7 +3229,11 @@ class LibraryWidget(QWidget):
                  "set read_tab_sizing lines",    "Read tab: 'flat' (default) or 'lines'"),
             ]),
             ("APPEARANCE", [
-                ("background_color",      self.config.get("background_color"),
+                ("current_swatch",       self.config.get("current_swatch") or "amber",
+                 "ctrl+k/l to cycle",             "Active colour swatch"),
+                ("indicator_color",      self.config.get("indicator_color"),
+                 "ctrl+o/p to cycle",             "Main line indicator colour"),
+                ("background_color",     self.config.get("background_color"),
                  "set background_color #1a1a1a",  "Main background"),
                 ("statusbar_color",       self.config.get("statusbar_color"),
                  "set statusbar_color #111111",   "Status bar background"),
@@ -3399,10 +3486,10 @@ class LibraryWidget(QWidget):
         if k in (Qt.Key.Key_Tab, Qt.Key.Key_Backspace):
             self._go_back(); return
         if ctrl:
-            if k == Qt.Key.Key_O:
+            if k == Qt.Key.Key_K:
                 self.parent().reader._cycle_swatch(-1)
                 self.update(); return
-            if k == Qt.Key.Key_P:
+            if k == Qt.Key.Key_L:
                 self.parent().reader._cycle_swatch(1)
                 self.update(); return
             if k == Qt.Key.Key_Comma:
@@ -3582,33 +3669,28 @@ class MainWindow(QMainWindow):
         k    = ev.key()
         ctrl = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
 
-        # Global shortcuts — work from any screen
         if k == Qt.Key.Key_F11:
             if self.isFullScreen(): self.showMaximized()
             else:                   self.showFullScreen()
             return
 
         if ctrl:
-            if k == Qt.Key.Key_L:
-                self.show_library(); return
-            if k == Qt.Key.Key_O:
+            if k == Qt.Key.Key_K:
                 self.reader._cycle_swatch(-1)
                 self.update()
                 if self.library.isVisible(): self.library.update()
                 return
-            if k == Qt.Key.Key_P:
+            if k == Qt.Key.Key_L:
                 self.reader._cycle_swatch(1)
                 self.update()
                 if self.library.isVisible(): self.library.update()
                 return
             if k == Qt.Key.Key_Comma:
                 self.reader._cycle_font(-1)
-                self.update()
-                return
+                self.update(); return
             if k == Qt.Key.Key_Period:
                 self.reader._cycle_font(1)
-                self.update()
-                return
+                self.update(); return
 
         super().keyPressEvent(ev)
 
