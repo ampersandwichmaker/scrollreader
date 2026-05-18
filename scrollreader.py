@@ -87,7 +87,7 @@ DEFAULT_SWATCH = [
     "#ff8800", "#d4a017",
 ]
 
-_UI_FONT_FAMILY = "Courier New"   # replaced at startup if VGA font loads
+_UI_FONT_FAMILY_ref = ["Courier New"]   # mutable ref — use _UI_FONT_FAMILY_ref[0]
 
 
 def _app_dir() -> str:
@@ -115,16 +115,16 @@ def _load_vga_font() -> str:
             if fid >= 0:
                 families = QFontDatabase.applicationFontFamilies(fid)
                 if families:
-                    _UI_FONT_FAMILY = families[0]
+                    _UI_FONT_FAMILY_ref[0] = families[0]
                     return families[0]
-    return _UI_FONT_FAMILY
+    return _UI_FONT_FAMILY_ref[0]
 
 
 _UI_FONT_OFFSET_ref = [0]   # mutable so no 'global' needed in methods
 
 
 def _ui_font(size: int = 10, bold: bool = False) -> QFont:
-    f = QFont(_UI_FONT_FAMILY, max(6, size + _UI_FONT_OFFSET_ref[0]))
+    f = QFont(_UI_FONT_FAMILY_ref[0], max(6, size + _UI_FONT_OFFSET_ref[0]))
     if bold:
         f.setWeight(QFont.Weight.Bold)
     return f
@@ -247,7 +247,7 @@ def _load_font_by_path(path: str) -> str:
         families = QFontDatabase.applicationFontFamilies(fid)
         if families:
             return families[0]
-    return _UI_FONT_FAMILY
+    return _UI_FONT_FAMILY_ref[0]
 
 
 
@@ -941,7 +941,7 @@ class ReaderWidget(QWidget):
     def _update_cmd_style(self):
         """Update command bar style to match current theme and font size."""
         sz  = max(6, 10 + _UI_FONT_OFFSET_ref[0])
-        fam = _UI_FONT_FAMILY
+        fam = _UI_FONT_FAMILY_ref[0]
         inv_bg = AMBER_INV_BG.name()
         inv_fg = AMBER_INV_FG.name()
         self.cmd.setStyleSheet(f"""
@@ -1495,8 +1495,8 @@ class ReaderWidget(QWidget):
                     ]))
             elif kind == "note":
                 painter.setPen(AMBER_DIM)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRect(QRect(mr.left()+2, ay+lh//2-3, 6, 6))
+                painter.setBrush(AMBER_DARK)
+                painter.drawRect(QRect(mr.left()+2, ay+lh//2-5, 9, 9))
                 painter.setPen(Qt.PenStyle.NoPen)
             else:  # highlight
                 painter.fillRect(QRect(mr.left()+2, ay, 4, max(2, lh)), AMBER_DIM)
@@ -1525,20 +1525,19 @@ class ReaderWidget(QWidget):
         items    = self._panel_items()
         font_b   = _ui_font(9, bold=True)
         font     = _ui_font(9)
-        item_h   = 38
-        py       = mr.top() + 4
         pw       = mr.width()
         px       = mr.left()
-        w        = self.width()
+        py       = mr.top() + 4
 
-        # Mode label
+        # Mode label + separator — draw separator BELOW the label with enough gap
         painter.setPen(AMBER_DIM)
         painter.setFont(font_b)
         mode_label = (self._panel_mode or "").upper()
-        painter.drawText(px+8, py+14, mode_label)
-        painter.setPen(_mk_pen(AMBER_VERY_DIM, self._bw()))
-        painter.drawLine(px+4, py+18, px+pw-4, py+18)
+        painter.drawText(px+8, py+16, mode_label)
         py += 22
+        painter.setPen(_mk_pen(AMBER_VERY_DIM, self._bw()))
+        painter.drawLine(px+4, py, px+pw-4, py)
+        py += 6
 
         if not items:
             painter.setPen(AMBER_DARK)
@@ -1547,32 +1546,56 @@ class ReaderWidget(QWidget):
                              Qt.AlignmentFlag.AlignCenter, "(none)")
             return
 
-        for idx, item in enumerate(items):
-            if py + item_h > mr.bottom() - 4: break
-            selected = (idx == self._panel_cursor)
+        fm_b = QFontMetrics(font_b)
+        fm   = QFontMetrics(font)
+        lh_line = fm.height() + 2
 
+        for idx, item in enumerate(items):
+            selected = (idx == self._panel_cursor)
             line_num = item.get("line", item.get("start_line", 0))
-            note_txt = item.get("note", "")
+            note_txt = item.get("note", "") or ""
+
             if self._panel_mode == "highlights":
                 loc_str = f"L{line_num+1}-{item.get('end_line',line_num)+1}"
             else:
                 loc_str = f"L{line_num+1:05d}"
 
+            # Calculate how many lines the note takes
+            note_lines = []
+            if note_txt:
+                words = note_txt.split()
+                cur_line = ""
+                for word in words:
+                    test = (cur_line + " " + word).strip()
+                    if fm.horizontalAdvance(test) <= pw - 16:
+                        cur_line = test
+                    else:
+                        if cur_line: note_lines.append(cur_line)
+                        cur_line = word
+                if cur_line: note_lines.append(cur_line)
+
+            # Find next item's Y to know how much room we have
+            item_h = 20 + len(note_lines) * lh_line + 6
+
+            if py + item_h > mr.bottom() - 4: break
+
             if selected:
                 painter.fillRect(QRect(px+2, py, pw-4, item_h), AMBER_INV_BG)
-                fg = AMBER_INV_FG
-                fg2 = AMBER_INV_FG
+                fg = AMBER_INV_FG; fg2 = AMBER_INV_FG
             else:
-                fg = AMBER
-                fg2 = AMBER_DIM
+                fg = AMBER; fg2 = AMBER_DIM
 
+            # Bigger location indicator
             painter.setPen(fg); painter.setFont(font_b)
             painter.drawText(px+8, py+16, loc_str)
-            if note_txt:
+
+            # Wrapped note text
+            if note_lines:
                 painter.setFont(font); painter.setPen(fg2)
-                fm = QFontMetrics(font)
-                painter.drawText(px+8, py+30,
-                    fm.elidedText(note_txt, Qt.TextElideMode.ElideRight, pw-16))
+                ty = py + 20
+                for line in note_lines:
+                    painter.drawText(px+8, ty + lh_line - 2, line)
+                    ty += lh_line
 
             painter.setPen(_mk_pen(AMBER_VERY_DIM, self._bw()))
             painter.drawLine(px+4, py+item_h, px+pw-4, py+item_h)
@@ -1584,7 +1607,11 @@ class ReaderWidget(QWidget):
         h, s, v, _ = cur.getHsvF()
         new_h = (h + delta_deg / 360.0) % 1.0
         new_color = QColor.fromHsvF(new_h, max(0.6, s), max(0.7, v))
-        self.config.set("indicator_color", new_color.name())
+        hex_color = new_color.name()
+        self.config.set("indicator_color", hex_color)
+        self.config.data["indicator_color"] = hex_color  # ensure immediate effect
+        self.status_text = f"indicator: {hex_color}"
+        QTimer.singleShot(3000, self._clear_status)
         self.update()
 
     def _open_annot_panel(self, mode: str) -> Optional[str]:
@@ -2131,6 +2158,10 @@ class ReaderWidget(QWidget):
             self._open_annot_panel("bookmarks")
         elif k == Qt.Key.Key_H:
             self._open_annot_panel("highlights")
+        elif k == Qt.Key.Key_R:
+            # Return to reading mode — close any open panel (no-op if already reading)
+            if self._panel_mode:
+                self._panel_back()
 
     def wheelEvent(self, ev: QWheelEvent):
         delta = ev.angleDelta().y()
@@ -2193,13 +2224,12 @@ class ReaderWidget(QWidget):
 
     def _cycle_font(self, direction: int):
         """Cycle through fonts in the fonts/ directory."""
-        global _UI_FONT_FAMILY
         fonts = _scan_fonts()
         if not fonts: return
         idx = int(self.config.get("current_font_idx") or 0)
         idx = (idx + direction) % len(fonts)
         fam = _load_font_by_path(fonts[idx])
-        _UI_FONT_FAMILY = fam
+        _UI_FONT_FAMILY_ref[0] = fam
         self.config.set("current_font_idx", str(idx))
         self._update_cmd_style()
         self.status_text = f"font: {os.path.basename(fonts[idx])}"
@@ -3674,6 +3704,42 @@ class MainWindow(QMainWindow):
             else:                   self.showFullScreen()
             return
 
+        # Global mode keys — work from any screen, not when command bar open
+        if not ctrl and not self.reader.command_mode:
+            if k == Qt.Key.Key_R:
+                # Return to reading mode — close library and any panel
+                if self.library.isVisible():
+                    self.library.hide()
+                    self.reader.setFocus()
+                if self.reader._panel_mode:
+                    self.reader._panel_back()
+                return
+            if k == Qt.Key.Key_L:
+                if self.library.isVisible():
+                    self.library.hide()
+                    self.reader.setFocus()
+                else:
+                    self.show_library()
+                return
+            if k == Qt.Key.Key_N:
+                if self.library.isVisible():
+                    self.library.hide()
+                    self.reader.setFocus()
+                self.reader._open_annot_panel("notes")
+                return
+            if k == Qt.Key.Key_B:
+                if self.library.isVisible():
+                    self.library.hide()
+                    self.reader.setFocus()
+                self.reader._open_annot_panel("bookmarks")
+                return
+            if k == Qt.Key.Key_H:
+                if self.library.isVisible():
+                    self.library.hide()
+                    self.reader.setFocus()
+                self.reader._open_annot_panel("highlights")
+                return
+
         if ctrl:
             if k == Qt.Key.Key_K:
                 self.reader._cycle_swatch(-1)
@@ -3713,8 +3779,7 @@ def main():
     fonts = _scan_fonts()
     fidx  = int(config.get("current_font_idx") or 0)
     if fonts and fidx < len(fonts):
-        global _UI_FONT_FAMILY
-        _UI_FONT_FAMILY = _load_font_by_path(fonts[fidx]) or _UI_FONT_FAMILY
+        _UI_FONT_FAMILY_ref[0] = _load_font_by_path(fonts[fidx]) or _UI_FONT_FAMILY_ref[0]
     history = History()
     initial = sys.argv[1] if len(sys.argv) > 1 and os.path.exists(sys.argv[1]) else None
     window  = MainWindow(config, history, initial_file=initial)
