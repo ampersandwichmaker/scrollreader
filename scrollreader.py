@@ -1275,9 +1275,10 @@ class ReaderWidget(QWidget):
                 painter.fillRect(QRect(px, sy, self.document.max_width, ey-sy), sh_col)
 
         # ── Current-line highlight band ────────────────────────────────────
-        ind_y = self._indicator_screen_y() + voff
-        painter.fillRect(QRect(px, ind_y-2, self.document.max_width, lh),
-                         QColor(255, 68, 68, int(self._cfg("highlight_alpha"))))
+        ind_y   = self._indicator_screen_y() + voff
+        ind_col = QColor(self._cfg("indicator_color") or "#ffb000")
+        ind_col.setAlpha(int(self._cfg("highlight_alpha") or 35))
+        painter.fillRect(QRect(px, ind_y-2, self.document.max_width, lh), ind_col)
 
         # ── Margins ────────────────────────────────────────────────────────
         self._paint_margin(painter, scroll, voff, vp, dlines, total, lh, ind_y)
@@ -1424,19 +1425,18 @@ class ReaderWidget(QWidget):
 
     def _paint_margin_reading(self, painter, mr, scroll, voff, vp,
                                dlines, total, lh, ind_y, e, side):
-        """Reading mode: small indicators + truncated annotation text."""
-        bw      = self._bw()
-        IND_W   = 12   # width of indicator strip
+        """Reading mode: small indicators + annotation text."""
+        IND_W   = 12
         TEXT_X  = mr.left() + IND_W + 6 if side == "right" else mr.left() + 6
         TEXT_W  = PANEL_W - IND_W - 10
         font    = _ui_font(8)
-        font_b  = _ui_font(8, bold=True)
         fm      = QFontMetrics(font)
         painter.setFont(font)
+        ind_color = QColor(self._cfg("indicator_color") or "#ffb000")
 
-        # Current line indicator (inward-pointing triangle)
+        # Current line indicator triangle
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(AMBER_BRIGHT)
+        painter.setBrush(ind_color)
         ty = ind_y + lh // 2
         sz = 7
         if side == "right":
@@ -1473,7 +1473,7 @@ class ReaderWidget(QWidget):
             if vp.top() <= ay <= vp.bottom():
                 items.append(("highlight", ay, sl, hh.get("note", "")))
 
-        # Sort by Y, draw each
+        # Annotation text — word-wrap notes, truncate bookmarks/highlights
         items.sort(key=lambda x: x[1])
         last_y = -999
         for kind, ay, line, note in items:
@@ -1498,16 +1498,34 @@ class ReaderWidget(QWidget):
                 painter.setBrush(AMBER_DARK)
                 painter.drawRect(QRect(mr.left()+2, ay+lh//2-5, 9, 9))
                 painter.setPen(Qt.PenStyle.NoPen)
-            else:  # highlight
+            else:
                 painter.fillRect(QRect(mr.left()+2, ay, 4, max(2, lh)), AMBER_DIM)
 
-            # Annotation text (truncated, no overlap)
-            if note and ay > last_y + 10:
+            # Note text — word wrap within available space
+            if note and ay > last_y + 4:
                 painter.setPen(AMBER_DIM)
                 painter.setFont(font)
-                truncated = fm.elidedText(note, Qt.TextElideMode.ElideRight, TEXT_W)
-                painter.drawText(TEXT_X, ay + lh - 3, truncated)
-                last_y = ay + lh
+                if kind == "note":
+                    # Word-wrap for notes
+                    words = note.split()
+                    cur_line = ""; ty = ay + lh
+                    for word in words:
+                        test = (cur_line + " " + word).strip()
+                        if fm.horizontalAdvance(test) <= TEXT_W:
+                            cur_line = test
+                        else:
+                            if cur_line:
+                                painter.drawText(TEXT_X, ty, cur_line)
+                                ty += fm.height() + 1
+                            cur_line = word
+                        if ty > vp.bottom(): break
+                    if cur_line and ty <= vp.bottom():
+                        painter.drawText(TEXT_X, ty, cur_line)
+                    last_y = ty
+                else:
+                    truncated = fm.elidedText(note, Qt.TextElideMode.ElideRight, TEXT_W)
+                    painter.drawText(TEXT_X, ay + lh - 3, truncated)
+                    last_y = ay + lh
 
         # Highlight bars (thin vertical strip)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -3515,6 +3533,21 @@ class LibraryWidget(QWidget):
 
         if k in (Qt.Key.Key_Tab, Qt.Key.Key_Backspace):
             self._go_back(); return
+
+        # Global mode keys
+        if not self._cmd_mode:
+            mw = self.parent()
+            if k == Qt.Key.Key_R or k == Qt.Key.Key_L:
+                self.hide(); mw.reader.setFocus(); return
+            if k == Qt.Key.Key_N:
+                self.hide(); mw.reader.setFocus()
+                mw.reader._open_annot_panel("notes"); return
+            if k == Qt.Key.Key_B:
+                self.hide(); mw.reader.setFocus()
+                mw.reader._open_annot_panel("bookmarks"); return
+            if k == Qt.Key.Key_H:
+                self.hide(); mw.reader.setFocus()
+                mw.reader._open_annot_panel("highlights"); return
         if ctrl:
             if k == Qt.Key.Key_K:
                 self.parent().reader._cycle_swatch(-1)
