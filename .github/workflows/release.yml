@@ -17,15 +17,10 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install PyMuPDF PyQt6 pyinstaller Pillow
-
-      - name: Generate icon
-        run: python tools/generate_icon.py
+        run: pip install PyMuPDF PyQt6 pyinstaller Pillow
 
       - name: Build exe with PyInstaller
         run: |
-          if (!(Test-Path fonts)) { New-Item -ItemType Directory -Path fonts }
           pyinstaller --onefile --windowed --name ScrollReader --add-data "fonts;fonts" scrollreader.py
 
       - name: Upload Windows exe
@@ -52,15 +47,10 @@ jobs:
             libxkbcommon-x11-0 libdbus-1-3
 
       - name: Install Python dependencies
-        run: |
-          pip install PyMuPDF PyQt6 pyinstaller Pillow
-
-      - name: Generate icon
-        run: python tools/generate_icon.py
+        run: pip install PyMuPDF PyQt6 pyinstaller Pillow
 
       - name: Build Linux binary
         run: |
-          mkdir -p fonts
           pyinstaller --onefile --name scrollreader --add-data "fonts:fonts" scrollreader.py
 
       - name: Make tarball
@@ -99,16 +89,16 @@ jobs:
             ## ScrollReader ${{ github.ref_name }}
 
             ### Downloads
-            - **Windows**: `ScrollReader.exe` — portable, double-click to run, no install needed
-            - **Linux**: `scrollreader-linux-*.tar.gz` — standalone binary, no Python needed
+            - **Windows**: `ScrollReader.exe` — portable, double-click to run, no install needed. Place a `fonts/` folder next to the exe to add your own fonts.
+            - **Linux**: `scrollreader-linux-*.tar.gz` — standalone binary, no Python needed.
 
-            ### Install from source
-            Install with pip and run directly:
+            ### Run from source
+            ```bash
+            pip install PyMuPDF PyQt6
+            python scrollreader.py
+            ```
 
-                pip install PyMuPDF PyQt6
-                python scrollreader.py
-
-            See [README](https://github.com/ampersandwichmaker/scrollreader#readme) for full command reference.
+            See [README](https://github.com/ampersandwichmaker/scrollreader#readme) for the full command and keybind reference.
           files: |
             artifacts/windows-exe/ScrollReader.exe
             artifacts/linux-binary/*.tar.gz
