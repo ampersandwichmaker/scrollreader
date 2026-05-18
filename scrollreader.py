@@ -99,15 +99,14 @@ def _app_dir() -> str:
 
 def _load_vga_font() -> str:
     """Try to load IBM VGA 8x16 font. Returns family name."""
-    global _UI_FONT_FAMILY
-    base     = _app_dir()
-    meipass  = getattr(sys, '_MEIPASS', base)
+    base    = _app_dir()
+    meipass = getattr(sys, '_MEIPASS', base)
     candidates = [
+        os.path.join(meipass, "fonts", "Px437_IBM_VGA_8x16.ttf"),
+        os.path.join(meipass, "fonts", "Px437_IBM_VGA-8x16.ttf"),
         os.path.join(base,    "fonts", "Px437_IBM_VGA_8x16.ttf"),
         os.path.join(base,    "fonts", "Px437_IBM_VGA-8x16.ttf"),
         os.path.join(base,    "fonts", "Web437_IBM_VGA_8x16.ttf"),
-        os.path.join(meipass, "fonts", "Px437_IBM_VGA_8x16.ttf"),
-        os.path.join(meipass, "fonts", "Px437_IBM_VGA-8x16.ttf"),
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -231,13 +230,23 @@ def _apply_swatch(name: str, config):
 
 
 def _scan_fonts() -> list:
-    """Return list of TTF/OTF paths in fonts/ next to the exe or script."""
-    fonts_dir = os.path.join(_app_dir(), "fonts")
-    if not os.path.exists(fonts_dir):
-        return []
-    return sorted([os.path.join(fonts_dir, f)
-                   for f in os.listdir(fonts_dir)
-                   if f.lower().endswith(('.ttf', '.otf', '.otb'))])
+    """Return TTF/OTF/OTB paths from both bundled (_MEIPASS) and user (exe dir) fonts folders."""
+    seen  = {}   # filename → path, user fonts override bundled
+    # 1. Bundled fonts inside the exe (_MEIPASS)
+    meipass = getattr(sys, '_MEIPASS', None)
+    if meipass:
+        bundled = os.path.join(meipass, "fonts")
+        if os.path.exists(bundled):
+            for f in os.listdir(bundled):
+                if f.lower().endswith(('.ttf', '.otf', '.otb')):
+                    seen[f.lower()] = os.path.join(bundled, f)
+    # 2. User fonts next to the exe/script (override bundled if same name)
+    user_dir = os.path.join(_app_dir(), "fonts")
+    if os.path.exists(user_dir):
+        for f in os.listdir(user_dir):
+            if f.lower().endswith(('.ttf', '.otf', '.otb')):
+                seen[f.lower()] = os.path.join(user_dir, f)
+    return sorted(seen.values())
 
 
 def _load_font_by_path(path: str) -> str:
@@ -3812,6 +3821,14 @@ def main():
     app     = QApplication(sys.argv)
     app.setApplicationName("ScrollReader")
     _load_vga_font()
+    # Preload all bundled fonts so Qt knows about them
+    meipass = getattr(sys, '_MEIPASS', None)
+    if meipass:
+        bundled = os.path.join(meipass, "fonts")
+        if os.path.exists(bundled):
+            for f in os.listdir(bundled):
+                if f.lower().endswith(('.ttf', '.otf', '.otb')):
+                    QFontDatabase.addApplicationFont(os.path.join(bundled, f))
     config  = Config()
     swatch = config.get("current_swatch") or "amber"
     _apply_swatch(swatch, config)
