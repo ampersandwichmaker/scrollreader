@@ -332,7 +332,7 @@ DEFAULT_CONFIG = {
     "eager_pages":           2,             # pages rendered synchronously each side of current
 }
 
-ZOOM_MODES = ["fit-width", "fit-page", "50%", "75%", "100%"]
+ZOOM_MODES = ["fit-width", "fit-page", "50%", "75%", "100%", "110%", "120%"]
 
 OVERRIDABLE_KEYS = {
     "indicator_color", "highlight_alpha", "highlight_height", "highlight_offset",
@@ -1154,33 +1154,15 @@ class ReaderWidget(QWidget):
         return float(self.config.get("zoom_fixed") or 1.5)
 
     def _rerender(self):
-        """Re-render document at new zoom without full reload."""
+        """Reload document at current zoom mode."""
         if not self.document: return
         old_line = self.current_line
         fp       = self.document.filepath
-
-        # Stop any background render thread first
         self._stop_render_thread()
-
-        # Recompute zoom
-        new_zoom = self._compute_zoom(self.zoom_mode, peek_path=fp)
-        if abs(new_zoom - self.document.zoom) < 0.001:
-            return  # no change needed
-
         try:
-            # Rebuild document at new zoom
-            doc = PDFDocument(fp, zoom=new_zoom,
-                              page_gap=int(self.config.get("page_gap") or 30))
-            self.document = doc
-            self.current_line = min(old_line, max(0, len(doc.lines)-1))
-
-            # Synchronous render of visible pages
-            cur_page = doc.lines[self.current_line].page_num if doc.lines else 0
-            eager    = int(self.config.get("eager_pages") or 2)
-            preload  = self.config.get("preload_inverted") is not False
-            doc.render_range(cur_page - eager, cur_page + eager,
-                             inverted=preload)
-            self._start_render_thread(cur_page)
+            self.load_document(fp)
+            if self.document:
+                self.current_line = min(old_line, max(0, len(self.document.lines)-1))
         except Exception as ex:
             self.status_text = f"zoom error: {ex}"
         self.update()
@@ -1393,9 +1375,8 @@ class ReaderWidget(QWidget):
     def _paint_top_bar(self, painter: QPainter):
         w = self.width()
         painter.fillRect(QRect(0, 0, w, TOP_BAR_H), UI_BG)
-        # Bottom separator
-        painter.setPen(AMBER_DARK)
-        painter.setPen(_mk_pen(AMBER_DARK, self._bw())); painter.drawLine(0, TOP_BAR_H-1, w, TOP_BAR_H-1)
+        painter.setPen(_mk_pen(AMBER_DARK, self._bw()))
+        painter.drawLine(0, TOP_BAR_H-1, w, TOP_BAR_H-1)
 
         font_b = _ui_font(9, bold=True)
         font   = _ui_font(9)
@@ -1404,7 +1385,6 @@ class ReaderWidget(QWidget):
         if self.document and self.document.lines:
             line  = self.document.lines[self.current_line]
             total = len(self.document.lines)
-            # Left: LINE ##/### PAGE ##/### METAR
             left_txt = (f"LINE {self.current_line+1}/{total}"
                         f"  PAGE {line.page_num+1}/{self.document.page_count}"
                         f"  {self._metar()}")
@@ -1412,10 +1392,9 @@ class ReaderWidget(QWidget):
             painter.setFont(font_b)
             painter.drawText(L_MARGIN + 6, ty, left_txt)
 
-            # Centre: TITLE, AUTHOR
-            e    = self.history._entry(self.document.filepath)
-            title  = (e.get("title") or Path(self.document.filepath).stem)[:28]
-            author = (e.get("author") or "")[:20]
+            e       = self.history._entry(self.document.filepath)
+            title   = (e.get("title") or Path(self.document.filepath).stem)[:28]
+            author  = (e.get("author") or "")[:20]
             centre_txt = f"{title}{',  '+author if author else ''}"
             painter.setPen(AMBER_BRIGHT)
             painter.setFont(font_b)
@@ -1423,15 +1402,30 @@ class ReaderWidget(QWidget):
             cx  = (w - fm.horizontalAdvance(centre_txt)) // 2
             painter.drawText(cx, ty, centre_txt)
 
-            # Right: MODE
+            # Right side: MODE label, then search input if active
             mode_map = {None: "READING", "bookmarks": "BOOKMARK VIEW",
-                        "notes": "NOTE VIEW", "highlights": "HIGHLIGHT VIEW"}
-            mode_txt = mode_map.get(self._panel_mode, "READING") + " MODE"
+                        "notes": "NOTE VIEW", "highlights": "HIGHLIGHT VIEW",
+                        "audionotes": "AUDIO NOTE VIEW"}
+            if getattr(self, '_search_panel_active', False):
+                mode_txt = "SEARCH VIEW MODE"
+            else:
+                mode_txt = mode_map.get(self._panel_mode, "READING") + " MODE"
+
+            right_x = (w - PANEL_W - fm.horizontalAdvance(mode_txt) - 8
+                       if self._margin_side() == "right" else PANEL_W + 8)
             painter.setPen(AMBER_DIM)
             painter.setFont(font)
-            painter.drawText(w - PANEL_W - fm.horizontalAdvance(mode_txt) - 8
-                             if self._margin_side() == "right"
-                             else PANEL_W + 8, ty, mode_txt)
+            painter.drawText(right_x, ty, mode_txt)
+
+            # Search input — shown right after mode text when search active
+            if getattr(self, '_search_panel_active', False):
+                query    = getattr(self, '_search_query', "")
+                q_active = getattr(self, '_search_input_active', False)
+                q_txt    = f"  /{query}{'_' if q_active else ''}"
+                q_x      = right_x + QFontMetrics(font).horizontalAdvance(mode_txt) + 12
+                painter.setPen(AMBER_BRIGHT if q_active else AMBER_DIM)
+                painter.setFont(font_b)
+                painter.drawText(q_x, ty, q_txt)
         else:
             painter.setPen(AMBER_DIM)
             painter.setFont(font_b)
@@ -1636,11 +1630,7 @@ class ReaderWidget(QWidget):
         py += 8
 
         if not items:
-            painter.setPen(AMBER_DARK)
-            painter.setFont(font)
-            painter.drawText(QRect(px, py, pw, 40),
-                             Qt.AlignmentFlag.AlignCenter, "(none)")
-            return
+            return   # just show empty panel, no (none) label
 
         fm_b = QFontMetrics(font_b)
         fm   = QFontMetrics(font)
@@ -2101,6 +2091,28 @@ class ReaderWidget(QWidget):
 
         # ── Search panel ──────────────────────────────────────────────────
         if getattr(self, '_search_panel_active', False):
+            input_active = getattr(self, '_search_input_active', False)
+
+            if input_active:
+                # Text input mode — typing updates query
+                if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    self._search_input_active = False
+                    self.update(); return
+                if k == Qt.Key.Key_Escape:
+                    self._search_input_active = False
+                    self.update(); return
+                if k == Qt.Key.Key_Backspace:
+                    self._search_query = getattr(self, '_search_query', "")[:-1]
+                    self._run_search(self._search_query)
+                    self.update(); return
+                ch = ev.text()
+                if ch and ch.isprintable():
+                    self._search_query = getattr(self, '_search_query', "") + ch
+                    self._run_search(self._search_query)
+                    self.update(); return
+                return
+
+            # Panel navigation mode
             if not ctrl:
                 if k == Qt.Key.Key_R:
                     self._search_panel_active = False
@@ -2131,18 +2143,9 @@ class ReaderWidget(QWidget):
                     self.update(); return
                 if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
                     self._search_select(); return
-                # Typing updates search query
-                ch = ev.text()
-                if ch and ch.isprintable():
-                    q = getattr(self, '_search_query', "") + ch
-                    self._search_query = q
-                    self._run_search(q)
-                    self.update(); return
-                if k == Qt.Key.Key_Backspace:
-                    q = getattr(self, '_search_query', "")
-                    self._search_query = q[:-1]
-                    self._run_search(self._search_query)
-                    self.update(); return
+            if ctrl and k in (Qt.Key.Key_Space, Qt.Key.Key_Return):
+                self._search_input_active = True
+                self.update(); return
             return
 
         # ── Config popup ──────────────────────────────────────────────────────
@@ -2248,6 +2251,10 @@ class ReaderWidget(QWidget):
         # ── Ctrl shortcuts ────────────────────────────────────────────────
         if ctrl:
             if k in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                # If search panel is open, activate the text input
+                if getattr(self, '_search_panel_active', False):
+                    self._search_input_active = True
+                    self.update(); return
                 self._enter_command_mode(); return
             if k == Qt.Key.Key_K:
                 self._cycle_swatch(-1); return
@@ -2270,9 +2277,19 @@ class ReaderWidget(QWidget):
                 QTimer.singleShot(3000, self._clear_status)
                 self.update(); return
             if k in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
-                self._adjust_zoom(0.15); return
+                idx = ZOOM_MODES.index(self.zoom_mode) if self.zoom_mode in ZOOM_MODES else 0
+                self.zoom_mode = ZOOM_MODES[(idx + 1) % len(ZOOM_MODES)]
+                self.config.set("zoom_mode", self.zoom_mode)
+                self.status_text = f"zoom: {self.zoom_mode}"
+                QTimer.singleShot(3000, self._clear_status)
+                self._rerender(); return
             if k == Qt.Key.Key_Minus:
-                self._adjust_zoom(-0.15); return
+                idx = ZOOM_MODES.index(self.zoom_mode) if self.zoom_mode in ZOOM_MODES else 0
+                self.zoom_mode = ZOOM_MODES[(idx - 1) % len(ZOOM_MODES)]
+                self.config.set("zoom_mode", self.zoom_mode)
+                self.status_text = f"zoom: {self.zoom_mode}"
+                QTimer.singleShot(3000, self._clear_status)
+                self._rerender(); return
             if k == Qt.Key.Key_BracketLeft:
                 cur = int(self._cfg("highlight_height") or 20)
                 self.config.set("highlight_height", str(max(4, cur - 2)))
@@ -2669,6 +2686,7 @@ class ReaderWidget(QWidget):
         """Open the search panel."""
         if not self.document: return
         self._search_panel_active = True
+        self._search_input_active = False   # Ctrl+Space to activate typing
         self._search_results      = getattr(self, '_search_results', [])
         self._search_pre_line     = self.current_line
         self._search_cursor       = 0
