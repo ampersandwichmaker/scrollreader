@@ -1660,10 +1660,9 @@ class ReaderWidget(QWidget):
                         cur_line = word
                 if cur_line: note_lines.append(cur_line)
 
-            # Find next item's Y to know how much room we have
-            item_h = 20 + len(note_lines) * lh_line + 6
+            item_h = 18 + len(note_lines) * lh_line + 2
 
-            if py + item_h > mr.bottom() - 4: break
+            if py + item_h > mr.bottom() - 2: break
 
             if selected:
                 painter.fillRect(QRect(px+2, py, pw-4, item_h), AMBER_INV_BG)
@@ -1671,14 +1670,14 @@ class ReaderWidget(QWidget):
             else:
                 fg = AMBER; fg2 = AMBER_DIM
 
-            # Bigger location indicator
+            # Location indicator
             painter.setPen(fg); painter.setFont(font_b)
-            painter.drawText(px+8, py+16, loc_str)
+            painter.drawText(px+8, py+14, loc_str)
 
             # Wrapped note text
             if note_lines:
                 painter.setFont(font); painter.setPen(fg2)
-                ty = py + 20
+                ty = py + 18
                 for line in note_lines:
                     painter.drawText(px+8, ty + lh_line - 2, line)
                     ty += lh_line
@@ -2251,11 +2250,13 @@ class ReaderWidget(QWidget):
         # ── Ctrl shortcuts ────────────────────────────────────────────────
         if ctrl:
             if k in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                # If search panel is open, activate the text input
+                # If search panel open, activate text input; otherwise open command bar
                 if getattr(self, '_search_panel_active', False):
                     self._search_input_active = True
                     self.update(); return
-                self._enter_command_mode(); return
+                if not getattr(self, '_search_input_active', False):
+                    self._enter_command_mode(); return
+                return
             if k == Qt.Key.Key_K:
                 self._cycle_swatch(-1); return
             if k == Qt.Key.Key_L:
@@ -2276,20 +2277,7 @@ class ReaderWidget(QWidget):
                 self.status_text = f"midpoint: {self.config.get('midpoint')}"
                 QTimer.singleShot(3000, self._clear_status)
                 self.update(); return
-            if k in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
-                idx = ZOOM_MODES.index(self.zoom_mode) if self.zoom_mode in ZOOM_MODES else 0
-                self.zoom_mode = ZOOM_MODES[(idx + 1) % len(ZOOM_MODES)]
-                self.config.set("zoom_mode", self.zoom_mode)
-                self.status_text = f"zoom: {self.zoom_mode}"
-                QTimer.singleShot(3000, self._clear_status)
-                self._rerender(); return
-            if k == Qt.Key.Key_Minus:
-                idx = ZOOM_MODES.index(self.zoom_mode) if self.zoom_mode in ZOOM_MODES else 0
-                self.zoom_mode = ZOOM_MODES[(idx - 1) % len(ZOOM_MODES)]
-                self.config.set("zoom_mode", self.zoom_mode)
-                self.status_text = f"zoom: {self.zoom_mode}"
-                QTimer.singleShot(3000, self._clear_status)
-                self._rerender(); return
+
             if k == Qt.Key.Key_BracketLeft:
                 cur = int(self._cfg("highlight_height") or 20)
                 self.config.set("highlight_height", str(max(4, cur - 2)))
@@ -2604,44 +2592,31 @@ class ReaderWidget(QWidget):
         painter.drawText(px+10, py+ph-4, "L-stick navigate · R-stick adjust · B to close")
 
     def _paint_search_panel(self, painter: QPainter, mr: QRect):
-        """Draw search panel in the margin."""
+        """Draw search results list in the margin panel."""
         results = getattr(self, '_search_results', [])
         cursor  = getattr(self, '_search_cursor', 0)
-        query   = getattr(self, '_search_query', "")
         font_b  = _ui_font(9, bold=True)
         font    = _ui_font(9)
-        fm      = QFontMetrics(font)
         px, pw  = mr.left(), mr.width()
         py      = mr.top() + 4
 
-        # Header
-        painter.fillRect(QRect(px, py, pw, 28), AMBER_VERY_DIM)
-        painter.setPen(AMBER_BRIGHT); painter.setFont(font_b)
-        painter.drawText(px+8, py+20, "SEARCH")
-        py += 32
+        # Thin top strip
+        painter.fillRect(QRect(px, mr.top(), pw, 4), AMBER_VERY_DIM)
 
-        # Query display
-        painter.setPen(AMBER_DIM); painter.setFont(font)
-        painter.drawText(px+8, py+16, f"/{query}_")
-        py += 24
-
-        painter.setPen(_mk_pen(AMBER_DARK, self._bw()))
-        painter.drawLine(px, py, px+pw, py)
-        py += 4
-
-        # PREVIOUS / NEXT nav items
+        # PREVIOUS / NEXT nav + results
         items = [("PREVIOUS", -1), ("NEXT", 1)] + [(f"L{r+1}", r) for r in results]
-        for i, (label, val) in enumerate(items):
-            if py + 20 > mr.bottom(): break
+        for i, (label, _val) in enumerate(items):
+            item_h = 20
+            if py + item_h > mr.bottom(): break
             selected = (i == cursor)
             if selected:
-                painter.fillRect(QRect(px+2, py, pw-4, 20), AMBER_INV_BG)
+                painter.fillRect(QRect(px+2, py, pw-4, item_h), AMBER_INV_BG)
                 painter.setPen(AMBER_INV_FG)
             else:
                 painter.setPen(AMBER if i < 2 else AMBER_DIM)
             painter.setFont(font_b if i < 2 else font)
-            painter.drawText(px+8, py+15, label)
-            py += 20
+            painter.drawText(px+8, py + item_h - 5, label)
+            py += item_h
 
     def _paint_vu_meter(self, painter: QPainter):
         """Draw a simple VU meter in the status bar during recording."""
@@ -4070,6 +4045,9 @@ class LibraryWidget(QWidget):
             if k == Qt.Key.Key_H:
                 self.hide(); mw.reader.setFocus()
                 mw.reader._open_annot_panel("highlights"); return
+            if k == Qt.Key.Key_J:
+                self.hide(); mw.reader.setFocus()
+                mw.reader._open_search_panel(); return
         if ctrl:
             if k == Qt.Key.Key_K:
                 self.parent().reader._cycle_swatch(-1)
@@ -4740,8 +4718,14 @@ class MainWindow(QMainWindow):
                     self.reader.setFocus()
                 self.reader._open_annot_panel("highlights")
                 return
-
-        if ctrl:
+            if k == Qt.Key.Key_J:
+                if self.library.isVisible():
+                    self.library.hide()
+                    self.reader.setFocus()
+                if self.reader._panel_mode:
+                    self.reader._panel_back()
+                self.reader._open_search_panel()
+                return
             if k == Qt.Key.Key_K:
                 self.reader._cycle_swatch(-1)
                 self.update()
