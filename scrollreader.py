@@ -4289,37 +4289,48 @@ class LibraryWidget(QWidget):
         self.update()
 
     def _cancel_lib_search(self):
-        """Cancel any running library search."""
+        """Cancel any running library search and wait for it to finish."""
         if self._lib_search_thread:
             self._lib_search_thread.cancel()
+            self._lib_search_thread.wait(500)  # wait up to 500ms for clean exit
             self._lib_search_thread = None
         self._lib_search_scanning = False
 
     def _start_lib_search(self, query: str):
-        """Start async library search."""
+        """Debounced async library search — waits 300ms after last keystroke."""
+        self._lib_search_query = query
+        # Debounce: cancel previous pending timer
+        if not hasattr(self, '_lib_search_debounce'):
+            self._lib_search_debounce = QTimer(self)
+            self._lib_search_debounce.setSingleShot(True)
+            self._lib_search_debounce.timeout.connect(self._do_lib_search)
+        self._lib_search_debounce.start(300)
+
+    def _do_lib_search(self):
+        """Actually start the search after debounce."""
+        query = self._lib_search_query
         self._cancel_lib_search()
-        self._lib_search_query    = query
         self._lib_search_results  = {}
         self._lib_search_progress = {}
         self._lib_search_cursor   = 0
 
-        # Collect all library PDFs
-        lib_dir  = self.config.get("library_dir") or _default_lib_dir()
+        lib_dir   = self.config.get("library_dir") or _default_lib_dir()
         recursive = bool(self.config.get("library_recursive"))
-        if recursive:
-            fps = [str(p) for p in Path(lib_dir).rglob("*.pdf")]
-        else:
-            fps = [str(p) for p in Path(lib_dir).glob("*.pdf")]
+        fps = ([str(p) for p in Path(lib_dir).rglob("*.pdf")]
+               if recursive else
+               [str(p) for p in Path(lib_dir).glob("*.pdf")])
         self._lib_search_all_fps = fps
 
-        if not fps or not query: return
-        self._lib_search_scanning = True
+        if not fps or not query:
+            self.update(); return
 
+        self._lib_search_scanning = True
         t = SearchIndexer(fps, query)
         t.result_ready.connect(self._on_search_result)
         t.scan_done.connect(self._on_search_done)
         self._lib_search_thread = t
         t.start()
+        self.update()
 
     def _on_search_result(self, fp: str, title_hits: int, content_hits: int):
         self._lib_search_results[fp]  = (title_hits, content_hits)
