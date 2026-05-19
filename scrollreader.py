@@ -3625,7 +3625,9 @@ class LibraryWidget(QWidget):
                    for (fp, hits), (_, s) in zip(scored, scaled)]
         vis     = [(b, a) for b, a in pairs if a >= MIN_A]
         if not vis: vis = pairs[:20]
-        rects   = _squarify(vis, content_rect)
+        books_list   = [b for b, _ in vis]
+        weights_list = [a for _, a in vis]
+        rects = _squarify(books_list, weights_list, x, y, w, h - bar_h, 2, 60, 50)
 
         self._lib_search_rects = []
         for idx, (b, rect) in enumerate(rects):
@@ -3697,7 +3699,9 @@ class LibraryWidget(QWidget):
         visible = [(b, a) for b, a in zip(books, norm_areas) if a >= MIN_AREA]
         if not visible: visible = [(b, norm_areas[i]) for i, b in enumerate(books)]
 
-        rects = _squarify(visible, QRect(x, y, w, h))
+        books_list   = [b for b, _ in vis_pairs]
+        areas_list   = [a for _, a in vis_pairs]
+        rects = _squarify(books_list, areas_list, x, y, w, h, 2, 60, 50)
         self._book_rects = []
 
         for idx, (b, rect) in enumerate(rects):
