@@ -2682,22 +2682,25 @@ class ReaderWidget(QWidget):
         painter.drawText(bar_x - 30, bar_y + bar_h - 2, "● REC")
 
     def _paint_scrollbar(self, painter: QPainter, mr: QRect, scroll: float, vp: QRect):
-        """Draw a scrollbar across the full bottom of the margin."""
+        """Draw a classic scrollbar indicator — full margin width, vertical position = doc position."""
         if not self.document or not self.document.lines: return
         total_h = self.document.total_height
         if total_h <= 0: return
-        vp_h    = vp.height()
+        vp_h = vp.height()
 
-        # Horizontal scrollbar at bottom of margin
-        bar_y = mr.bottom() - 5
-        bar_w = mr.width()
-        bar_x = mr.left()
+        track_x = mr.left()
+        track_y = mr.top()
+        track_w = mr.width()
+        track_h = mr.height()
 
-        painter.fillRect(QRect(bar_x, bar_y, bar_w, 4), AMBER_VERY_DIM)
-        thumb_w = max(12, int(bar_w * vp_h / max(total_h, 1)))
-        thumb_x = bar_x + int((bar_w - thumb_w) * scroll / max(total_h - vp_h, 1))
-        thumb_x = max(bar_x, min(bar_x + bar_w - thumb_w, thumb_x))
-        painter.fillRect(QRect(thumb_x, bar_y, thumb_w, 4), AMBER_DIM)
+        # Thumb height proportional to view/total, position proportional to scroll
+        thumb_h = max(8, int(track_h * vp_h / max(total_h, 1)))
+        thumb_y = track_y + int((track_h - thumb_h) * scroll / max(total_h - vp_h, 1))
+        thumb_y = max(track_y, min(track_y + track_h - thumb_h, thumb_y))
+
+        # Draw as a dim full-width rect
+        c = QColor(AMBER_DIM); c.setAlpha(60)
+        painter.fillRect(QRect(track_x, thumb_y, track_w, thumb_h), c)
 
     def _open_panel(self, title: str, kind: str):
         """Open a named overlay panel."""
@@ -3595,81 +3598,77 @@ class LibraryWidget(QWidget):
                              "Ctrl+Space to search")
             return
 
-        # Build sorted book list from results
+        # Build list, size by hit count using treemap
         all_fps = list(getattr(self, '_lib_search_all_fps', []))
         if not all_fps: return
 
-        # Score and sort
-        scored = []
-        for fp in all_fps:
-            r = results.get(fp, (0, 0))
-            total_hits = r[0] + r[1]
-            scored.append((fp, total_hits, r[0], r[1]))
-        scored.sort(key=lambda x: x[1], reverse=True)
-        scored = [s for s in scored if s[1] > 0] or scored[:20]
+        scored = [(fp, (results[fp][0]+results[fp][1]) if fp in results else 0)
+                  for fp in all_fps]
 
-        # Treemap layout — equal sized for simplicity in search
-        if not scored: return
-        n      = len(scored)
-        cols   = max(1, int((w / 200)**0.5 * (h / 150)**0.5))
-        rows   = max(1, (n + cols - 1) // cols)
-        bw     = w // cols
-        bh     = max(80, h // max(rows, 1))
+        scanning = getattr(self, '_lib_search_scanning', False)
+        if not scanning:
+            scored = [(fp, h) for fp, h in scored if h > 0]
+        if not scored:
+            if not scanning:
+                painter.setPen(AMBER_DARK); painter.setFont(_ui_font(13))
+                painter.drawText(QRect(x, y, w, h-bar_h),
+                                 Qt.AlignmentFlag.AlignCenter, "no results")
+            return
+
+        # Treemap: fourth-root scaling by hit count, placeholder score=1 while scanning
+        content_rect = QRect(x, y, w, h - bar_h)
+        area    = w * (h - bar_h)
+        MIN_A   = 1800
+        scaled  = [(fp, max(1, hits**0.25)) for fp, hits in scored]
+        total_s = max(sum(s for _, s in scaled), 1)
+        pairs   = [({'fp': fp, 'hits': hits}, (s/total_s)*area)
+                   for (fp, hits), (_, s) in zip(scored, scaled)]
+        vis     = [(b, a) for b, a in pairs if a >= MIN_A]
+        if not vis: vis = pairs[:20]
+        rects   = _squarify(vis, content_rect)
 
         self._lib_search_rects = []
-        for i, (fp, total, title_h, content_h) in enumerate(scored):
-            bx = x + (i % cols) * bw
-            by = y + (i // cols) * bh
-            rect = QRect(bx, by, bw-2, bh-2)
+        for idx, (b, rect) in enumerate(rects):
+            fp        = b['fp']
+            hits      = b['hits']
+            scan_frac = progress.get(fp, 0.0)
+            selected  = (idx == getattr(self, '_lib_search_cursor', 0))
 
-            # Progressive reveal — fill from bottom based on scan progress
-            scan_frac = progress.get(fp, 0.0)   # 0.0=not scanned, 1.0=done
-            if scan_frac < 1.0:
-                # Desaturated placeholder
-                bg = AMBER_VERY_DIM
-                painter.fillRect(rect, bg)
-                # Fill line moving bottom→top
-                fill_h = int(rect.height() * scan_frac)
-                if fill_h > 0:
-                    fill_rect = QRect(rect.x(), rect.bottom()-fill_h,
-                                      rect.width(), fill_h)
-                    painter.fillRect(fill_rect, AMBER_DARK)
-            else:
-                painter.fillRect(rect, AMBER_DARK)
-
-            selected = (i == getattr(self, '_lib_search_cursor', 0))
+            # Fill state
             if selected:
-                painter.fillRect(rect, AMBER_INV_BG)
-                fg = AMBER_INV_FG
+                painter.fillRect(rect, AMBER_INV_BG); fg = AMBER_INV_FG
+            elif scan_frac < 1.0:
+                painter.fillRect(rect, AMBER_VERY_DIM)
+                fh = int(rect.height() * scan_frac)
+                if fh > 0:
+                    painter.fillRect(QRect(rect.x(), rect.bottom()-fh, rect.width(), fh),
+                                     AMBER_DARK)
+                fg = AMBER_DIM
             else:
-                fg = AMBER_BRIGHT
+                painter.fillRect(rect, AMBER_DARK); fg = AMBER_BRIGHT
 
-            painter.setPen(_mk_pen(AMBER if not selected else AMBER_BRIGHT, 1))
+            painter.setPen(_mk_pen(AMBER_BRIGHT if selected else AMBER, 1))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(rect)
 
-            # Text rows
             e     = self.history._entry(fp)
-            title = (e.get("title") or Path(fp).stem)
+            title = e.get("title") or Path(fp).stem
             tp    = e.get("total_pages") or 1
-            n_    = len(e.get("notes", []))
-            b_    = len(e.get("bookmarks", []))
-            hh_   = len(e.get("highlights", []))
-            ac    = e.get("access_count", 0)
-            metar = f"N{n_}B{b_}H{hh_}A{ac}P{tp}"
+            metar = f"N{len(e.get('notes',[]))}B{len(e.get('bookmarks',[]))}H{len(e.get('highlights',[]))}A{e.get('access_count',0)}P{tp}"
 
             painter.setPen(fg)
-            ty = rect.top() + 14
+            ty = rect.top() + 13
             painter.setFont(font)
-            painter.drawText(rect.left()+6, ty, metar)
-            ty += 16
+            painter.drawText(rect.left()+5, ty,
+                QFontMetrics(font).elidedText(metar, Qt.TextElideMode.ElideRight, rect.width()-8))
+            ty += 15
             painter.setFont(font_b)
-            painter.drawText(rect.left()+6, ty,
-                QFontMetrics(font_b).elidedText(title, Qt.TextElideMode.ElideRight, bw-12))
-            if total > 0 and scan_frac >= 1.0:
-                ty += 18
+            painter.drawText(rect.left()+5, ty,
+                QFontMetrics(font_b).elidedText(title, Qt.TextElideMode.ElideRight, rect.width()-8))
+            if hits > 0 and scan_frac >= 1.0 and rect.height() > 50:
+                ty += 20
                 painter.setFont(font_big)
-                painter.drawText(rect.left()+6, ty, f"{total} hits")
+                painter.drawText(rect.left()+5, ty, f"{hits}")
 
             self._lib_search_rects.append((rect, fp))
 
