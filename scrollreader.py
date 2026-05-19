@@ -336,7 +336,8 @@ DEFAULT_CONFIG = {
     "eager_pages":           2,             # pages rendered synchronously each side of current
 }
 
-ZOOM_MODES = ["fit-width", "fit-page", "50%", "75%", "100%", "110%", "120%"]
+ZOOM_MODES   = ["fit-width", "fit-page", "50%", "75%", "100%", "110%", "120%"]
+EBOOK_EXTS   = {".pdf", ".epub", ".cbz", ".mobi", ".fb2", ".xps"}
 
 OVERRIDABLE_KEYS = {
     "indicator_color", "highlight_alpha", "highlight_height", "highlight_offset",
@@ -1352,7 +1353,7 @@ class ReaderWidget(QWidget):
         self._paint_frame(painter)
         self._paint_top_bar(painter)
         self._paint_bottom_bar(painter)
-        self._paint_vu_meter(painter)
+        self._paint_activity_meter(painter)
 
         # ── Overlays ──────────────────────────────────────────────────────
         if self.panel and self.panel.get("kind") == "help":
@@ -2665,21 +2666,57 @@ class ReaderWidget(QWidget):
             painter.drawText(px+8, py + item_h - 5, label)
             py += item_h
 
-    def _paint_vu_meter(self, painter: QPainter):
-        """Draw a simple VU meter in the status bar during recording."""
-        if not getattr(self, '_vu_active', False): return
-        level  = _audio_recorder.vu_level
-        w, h   = self.width(), self.height()
-        bar_w  = int(level * 80)
-        bar_x  = w - 100
-        bar_y  = h - BOTTOM_BAR_H + 6
-        bar_h  = BOTTOM_BAR_H - 12
-        painter.fillRect(QRect(bar_x, bar_y, 80, bar_h), AMBER_VERY_DIM)
-        col = QColor("#ff4444") if level > 0.8 else QColor("#ffbb33") if level > 0.4 else QColor("#44ff88")
-        painter.fillRect(QRect(bar_x, bar_y, bar_w, bar_h), col)
-        painter.setPen(AMBER_DIM)
-        painter.setFont(_ui_font(8))
-        painter.drawText(bar_x - 30, bar_y + bar_h - 2, "● REC")
+    def _paint_activity_meter(self, painter: QPainter):
+        """Draw small bottom-to-top progress bars in lower-right of status bar.
+        One bar per active background task — audio meter aesthetic."""
+        tasks = []
+
+        # PDF render thread
+        if self._render_thread and self.document:
+            rendered  = sum(1 for p in self.document.page_pixmaps if p is not None)
+            total_p   = self.document.page_count
+            frac      = rendered / max(total_p, 1)
+            tasks.append(("render", frac, AMBER))
+
+        # Inverted page preload
+        if self._render_thread and self.document:
+            rendered_inv = sum(1 for p in self.document.page_pixmaps_inv if p is not None)
+            total_p      = self.document.page_count
+            frac_inv     = rendered_inv / max(total_p, 1)
+            if frac_inv < 1.0:
+                tasks.append(("invert", frac_inv, AMBER_DIM))
+
+        # Audio recording VU
+        if getattr(self, '_vu_active', False):
+            level = _audio_recorder.vu_level
+            col   = QColor("#ff4444") if level > 0.8 else QColor("#ffbb33") if level > 0.4 else QColor("#44ff88")
+            tasks.append(("audio", level, col))
+
+        if not tasks: return
+
+        w, h     = self.width(), self.height()
+        bar_w    = 6
+        bar_gap  = 3
+        bar_h    = BOTTOM_BAR_H - 6
+        total_w  = len(tasks) * (bar_w + bar_gap) - bar_gap
+        start_x  = w - total_w - 8
+        base_y   = h - BOTTOM_BAR_H + 3
+
+        for i, (name, frac, color) in enumerate(tasks):
+            bx     = start_x + i * (bar_w + bar_gap)
+            # Track
+            painter.fillRect(QRect(bx, base_y, bar_w, bar_h), AMBER_VERY_DIM)
+            # Fill from bottom up
+            fill_h = max(2, int(bar_h * frac))
+            fy     = base_y + bar_h - fill_h
+            c      = QColor(color)
+            painter.fillRect(QRect(bx, fy, bar_w, fill_h), c)
+
+        # Small REC label if recording
+        if getattr(self, '_vu_active', False):
+            painter.setPen(QColor("#ff4444"))
+            painter.setFont(_ui_font(8))
+            painter.drawText(start_x - 30, h - BOTTOM_BAR_H + bar_h - 1, "REC")
 
     def _paint_scrollbar(self, painter: QPainter, mr: QRect, scroll: float, vp: QRect):
         """Draw a classic scrollbar indicator — full margin width, vertical position = doc position."""
@@ -2804,7 +2841,11 @@ class ReaderWidget(QWidget):
         if cmd in ("q","quit","exit"):         QApplication.quit(); return None
         if cmd == "open":
             if len(parts) < 2: return "usage: open <path>"
-            self.load_document(" ".join(parts[1:])); return None
+            path = os.path.expanduser(" ".join(parts[1:]))
+            ext  = Path(path).suffix.lower()
+            if ext not in EBOOK_EXTS:
+                return f"unsupported format: {ext}  (supported: {', '.join(sorted(EBOOK_EXTS))})"
+            self.load_document(path); return None
         if cmd in ("lib", "library"):
             self.window().show_library(); return None
         if cmd == "fav":
@@ -3369,6 +3410,8 @@ class LibraryWidget(QWidget):
         self._lib_search_cursor       = 0
         self._lib_search_input_active = False
         self._lib_search_thread: Optional[SearchIndexer] = None
+        self._lib_refreshing      = False
+        self._lib_refresh_frac    = 0.0
 
     def resizeEvent(self, ev):
         self.cmd.setGeometry(0, self.height() - 26, self.width(), 26)
@@ -3388,18 +3431,26 @@ class LibraryWidget(QWidget):
         lib_dir   = self.config.get("library_dir") or _default_lib_dir()
         recursive = bool(self.config.get("library_recursive") or False)
         found     = _scan_pdfs(lib_dir, recursive)
-        changed   = False
-        for fp in found:
+        need_peek = [fp for fp in found
+                     if not self.history._entry(fp).get("total_pages")]
+        if need_peek:
+            self._lib_refreshing   = True
+            self._lib_refresh_frac = 0.0
+            self.update()
+        changed = False
+        for i, fp in enumerate(need_peek):
             e = self.history._entry(fp)
-            if not e.get("total_pages"):
-                try:
-                    doc = fitz.open(fp)
-                    n   = len(doc)
-                    doc.close()
-                    e["total_pages"] = n
-                    changed = True
-                except Exception:
-                    e["total_pages"] = 1
+            try:
+                doc = fitz.open(fp)
+                e["total_pages"] = len(doc)
+                doc.close()
+                changed = True
+            except Exception:
+                e["total_pages"] = 1
+            self._lib_refresh_frac = (i + 1) / max(len(need_peek), 1)
+            self.update()
+            QApplication.processEvents()
+        self._lib_refreshing = False
         if changed:
             self.history._save()
 
@@ -3458,7 +3509,7 @@ class LibraryWidget(QWidget):
             ref_dir = os.path.join(lib_dir, "reference")
         if not os.path.exists(ref_dir): return []
         books = []
-        for fp in sorted(Path(ref_dir).rglob("*.pdf")):
+        for fp in sorted(p for p in Path(ref_dir).rglob("*") if p.suffix.lower() in EBOOK_EXTS):
             fp = str(fp)
             e  = self.history._entry(fp)
             tp = e.get("total_pages") or 1
@@ -4159,6 +4210,28 @@ class LibraryWidget(QWidget):
         )
         painter.drawText(x + 12, y + LIB_STATUS_H - 6, msg)
 
+        # Activity bars — right side
+        tasks = []
+        if getattr(self, '_lib_search_scanning', False):
+            done  = sum(1 for v in self._lib_search_progress.values() if v >= 1.0)
+            total = max(len(self._lib_search_all_fps), 1)
+            tasks.append((done / total, AMBER))
+        if getattr(self, '_lib_refreshing', False):
+            tasks.append((getattr(self, '_lib_refresh_frac', 0.5), AMBER_DIM))
+
+        if not tasks: return
+        bar_w   = 6
+        bar_gap = 3
+        bar_h   = LIB_STATUS_H - 6
+        total_w = len(tasks) * (bar_w + bar_gap) - bar_gap
+        bx      = x + w - total_w - 8
+        by      = y + 3
+        for frac, color in tasks:
+            painter.fillRect(QRect(bx, by, bar_w, bar_h), AMBER_VERY_DIM)
+            fill_h = max(2, int(bar_h * frac))
+            painter.fillRect(QRect(bx, by + bar_h - fill_h, bar_w, fill_h), color)
+            bx += bar_w + bar_gap
+
     # --------------------------------------------------------------- input
 
     def eventFilter(self, obj, event):
@@ -4316,9 +4389,9 @@ class LibraryWidget(QWidget):
 
         lib_dir   = self.config.get("library_dir") or _default_lib_dir()
         recursive = bool(self.config.get("library_recursive"))
-        fps = ([str(p) for p in Path(lib_dir).rglob("*.pdf")]
+        fps = ([str(p) for p in Path(lib_dir).rglob("*") if p.suffix.lower() in EBOOK_EXTS]
                if recursive else
-               [str(p) for p in Path(lib_dir).glob("*.pdf")])
+               [str(p) for p in Path(lib_dir).glob("*") if p.suffix.lower() in EBOOK_EXTS])
         self._lib_search_all_fps = fps
 
         if not fps or not query:
@@ -5119,8 +5192,13 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(80, lambda: self.reader.load_document(path))
 
     def _vu_tick(self):
-        if getattr(self.reader, '_vu_active', False):
-            self.reader.update()
+        r = self.reader
+        if (getattr(r, '_vu_active', False) or
+                r._render_thread is not None):
+            r.update()
+        if (self.library.isVisible() and
+                getattr(self.library, '_lib_search_scanning', False)):
+            self.library.update()
 
     def show_library(self):
         try:
