@@ -331,6 +331,8 @@ DEFAULT_CONFIG = {
     "bottom_bar_h":          28,
     "panel_w":               160,
     "reference_dir":         None,
+    "cache_window":          12,
+    "inv_window":            6,
     "help_col_offset":       0,
     "library_flip_mode":     False,
     "eager_pages":           2,             # pages rendered synchronously each side of current
@@ -551,9 +553,30 @@ class History:
                 pass
 
     def _save(self):
-        APP_DIR.mkdir(parents=True, exist_ok=True)
-        with open(HISTORY_PATH, "w") as f:
-            json.dump(self.data, f, indent=2)
+        """Debounced save — flushes at most once per 3s, always flushes on close."""
+        now = time.time()
+        if now - getattr(self, '_last_save', 0) >= 3.0:
+            self._flush()
+        else:
+            self._save_pending = True  # picked up by flush_pending()
+
+    def _flush(self):
+        """Atomically write history to disk."""
+        try:
+            APP_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = str(HISTORY_PATH) + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.data, f, indent=2)
+            os.replace(tmp, str(HISTORY_PATH))
+        except Exception:
+            pass
+        self._last_save    = time.time()
+        self._save_pending = False
+
+    def flush_pending(self):
+        """Call on app exit to flush any pending debounced save."""
+        if getattr(self, '_save_pending', False):
+            self._flush()
 
     def _entry(self, filepath: str) -> dict:
         key = str(filepath)
@@ -828,8 +851,8 @@ class PDFDocument:
                      pix.stride, QImage.Format.Format_RGB888)
         return QPixmap.fromImage(img)
 
-    CACHE_WINDOW = 12   # keep ±6 pages normal
-    INV_WINDOW   = 6    # keep ±3 pages inverted
+    CACHE_WINDOW = 12   # overridden at load time from config
+    INV_WINDOW   = 6    # overridden at load time from config
 
     def evict_distant_pages(self, cur_page: int):
         """Free pixmaps outside the sliding window. Inverted always evicted with normal."""
@@ -1083,6 +1106,8 @@ class ReaderWidget(QWidget):
             self.history.set_totals(filepath, len(doc.lines), doc.page_count)
 
             self.document     = doc
+            doc.CACHE_WINDOW  = int(self.config.get("cache_window") or 12)
+            doc.INV_WINDOW    = int(self.config.get("inv_window") or 6)
             self.current_line = min(self.history.get_line(filepath), max(0, len(doc.lines)-1))
             self.panel        = None
             self._pending     = None
@@ -2463,6 +2488,11 @@ class ReaderWidget(QWidget):
             if self._panel_mode:
                 self._panel_back()
 
+
+    def focusOutEvent(self, ev):
+        self._g_pending = False
+        super().focusOutEvent(ev)
+
     def wheelEvent(self, ev: QWheelEvent):
         delta = ev.angleDelta().y()
         if not delta: return
@@ -3456,7 +3486,7 @@ class LibraryWidget(QWidget):
     # ---------------------------------------------------------------- data
 
     def _refresh_books(self):
-        """Scan library dir and merge with history, peeking page counts for new PDFs."""
+        """Scan library dir; peek page counts for new books synchronously."""
         lib_dir   = self.config.get("library_dir") or _default_lib_dir()
         recursive = bool(self.config.get("library_recursive") or False)
         found     = _scan_pdfs(lib_dir, recursive)
@@ -3478,10 +3508,18 @@ class LibraryWidget(QWidget):
                 e["total_pages"] = 1
             self._lib_refresh_frac = (i + 1) / max(len(need_peek), 1)
             self.update()
-            QApplication.processEvents()
         self._lib_refreshing = False
         if changed:
             self.history._save()
+
+    def _on_refresh_progress(self, frac: float):
+        self._lib_refresh_frac = frac
+        self.update()
+
+    def _on_refresh_done(self):
+        self._lib_refreshing   = False
+        self._lib_refresh_frac = 1.0
+        self.update()
 
     def _all_books(self) -> list[dict]:
         """Return list of enriched book dicts from history."""
@@ -4559,6 +4597,11 @@ class LibraryWidget(QWidget):
             if self._book_rects: self._cursor_idx = max(0, self._cursor_idx-1)
             self.update(); return
 
+
+    def focusOutEvent(self, ev):
+        self._g_pending = False
+        super().focusOutEvent(ev)
+
     def wheelEvent(self, ev: QWheelEvent):
         delta = ev.angleDelta().y()
         n = len(self._book_rects)
@@ -5162,7 +5205,7 @@ class SearchIndexer(QThread):
                         page.get_text("text") for page in doc
                     ).lower()
                     doc.close()
-                    self._index[fp] = {"mtime": mtime, "text": text}
+                    self._index[fp] = {"mtime": mtime, "text": text[:500_000]}
                     dirty = True
                 except Exception:
                     text = ""
@@ -5219,6 +5262,27 @@ class MainWindow(QMainWindow):
         if load_path:
             path = load_path
             QTimer.singleShot(80, lambda: self.reader.load_document(path))
+
+    def closeEvent(self, ev):
+        """Clean shutdown — stop threads, flush pending saves."""
+        # Stop render thread
+        self.reader._stop_render_thread()
+        # Stop library search thread
+        lib = self.library
+        if getattr(lib, '_lib_search_thread', None):
+            lib._lib_search_thread.cancel()
+            lib._lib_search_thread.wait(500)
+        # Stop gamepad timer
+        if hasattr(self, '_gp_timer'):
+            self._gp_timer.stop()
+        if hasattr(self, '_vu_timer'):
+            self._vu_timer.stop()
+        # Stop audio if recording
+        if _audio_recorder.recording:
+            _audio_recorder.stop_and_save("/dev/null")
+        # Flush any pending history save
+        self.reader.history.flush_pending()
+        ev.accept()
 
     def _vu_tick(self):
         r = self.reader
