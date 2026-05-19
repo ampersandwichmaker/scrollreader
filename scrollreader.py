@@ -828,6 +828,19 @@ class PDFDocument:
                      pix.stride, QImage.Format.Format_RGB888)
         return QPixmap.fromImage(img)
 
+    CACHE_WINDOW = 12   # keep ±6 pages normal
+    INV_WINDOW   = 6    # keep ±3 pages inverted
+
+    def evict_distant_pages(self, cur_page: int):
+        """Free pixmaps outside the sliding window. Inverted always evicted with normal."""
+        for pn in range(len(self.doc)):
+            dist = abs(pn - cur_page)
+            if dist > self.CACHE_WINDOW:
+                self.page_pixmaps[pn]     = None
+                self.page_pixmaps_inv[pn] = None   # evict together
+            elif dist > self.INV_WINDOW:
+                self.page_pixmaps_inv[pn] = None   # inverted-only evict
+
     def render_range(self, start: int, end: int, inverted: bool = False):
         start = max(0, start)
         end   = min(len(self.doc) - 1, end)
@@ -871,11 +884,15 @@ class RenderThread(QThread):
         self._cancel = True
 
     def run(self):
-        n     = self.document.page_count
-        order = _render_order(self.start_page, n)
-        # Pass 1: normal render
+        n      = self.document.page_count
+        window = self.document.CACHE_WINDOW
+        inv_w  = self.document.INV_WINDOW
+        order  = _render_order(self.start_page, n)
+
+        # Pass 1: normal render — only within window
         for pn in order:
             if self._cancel: return
+            if abs(pn - self.start_page) > window: continue
             if self.document.page_pixmaps[pn] is None:
                 try:
                     pm = self.document.render_page(pn)
@@ -883,10 +900,14 @@ class RenderThread(QThread):
                     self.page_ready.emit(pn, pm)
                 except Exception:
                     pass
-        # Pass 2: inverted render (if enabled)
+
+        # Pass 2: inverted render — only for pages that are already normally rendered
         if self.preload_inv:
             for pn in order:
                 if self._cancel: return
+                if abs(pn - self.start_page) > inv_w: continue
+                # Only invert if normal page is already in cache
+                if self.document.page_pixmaps[pn] is None: continue
                 if self.document.page_pixmaps_inv[pn] is None:
                     try:
                         pm_inv = self.document.render_page_inv(pn)
@@ -2469,9 +2490,17 @@ class ReaderWidget(QWidget):
 
     def _step(self, delta):
         if not self.document: return
+        old = self.current_line
         self._push_history(self.current_line)
         self.current_line = max(0, min(len(self.document.lines)-1, self.current_line+delta))
         self.history.set_line(self.document.filepath, self.current_line)
+        # Evict distant pages and restart render thread if needed
+        if self.document.lines:
+            cur_page = self.document.lines[self.current_line].page_num
+            self.document.evict_distant_pages(cur_page)
+            if (self._render_thread is None or
+                    not self._render_thread.isRunning()):
+                self._start_render_thread(cur_page)
         self.update()
 
     def _jump_pages(self, direction):
