@@ -1108,6 +1108,24 @@ class ReaderWidget(QWidget):
             self.document     = doc
             doc.CACHE_WINDOW  = int(self.config.get("cache_window") or 12)
             doc.INV_WINDOW    = int(self.config.get("inv_window") or 6)
+
+            # Memory guard: cap zoom if pages are very large
+            # Each page at zoom z is approximately (w*z * h*z * 3 bytes)
+            # Cap so that a single page is at most 64MB
+            max_page_mb = 64
+            w_px = doc.natural_width  * doc.zoom
+            h_px = doc.natural_height * doc.zoom
+            page_mb = (w_px * h_px * 3) / (1024 * 1024)
+            if page_mb > max_page_mb:
+                safe_zoom = (max_page_mb * 1024 * 1024 / (doc.natural_width * doc.natural_height * 3)) ** 0.5
+                safe_zoom = max(0.3, round(safe_zoom, 2))
+                self.status_text = f"large file: zoom capped at {safe_zoom:.2f}"
+                QTimer.singleShot(5000, self._clear_status)
+                doc = PDFDocument(filepath, zoom=safe_zoom,
+                                  page_gap=int(self.config.get("page_gap")))
+                doc.CACHE_WINDOW = int(self.config.get("cache_window") or 12)
+                doc.INV_WINDOW   = int(self.config.get("inv_window") or 6)
+                self.document    = doc
             self.current_line = min(self.history.get_line(filepath), max(0, len(doc.lines)-1))
             self.panel        = None
             self._pending     = None
@@ -1144,7 +1162,7 @@ class ReaderWidget(QWidget):
     def _stop_render_thread(self):
         if self._render_thread is not None:
             self._render_thread.cancel()
-            self._render_thread.wait(200)
+            self._render_thread.wait(1000)   # wait up to 1s for clean exit
             self._render_thread = None
 
     def _on_page_ready(self, pn: int, pixmap: QPixmap):
@@ -2524,13 +2542,16 @@ class ReaderWidget(QWidget):
         self._push_history(self.current_line)
         self.current_line = max(0, min(len(self.document.lines)-1, self.current_line+delta))
         self.history.set_line(self.document.filepath, self.current_line)
-        # Evict distant pages and restart render thread if needed
+        # Only evict/restart render when page actually changes
         if self.document.lines:
             cur_page = self.document.lines[self.current_line].page_num
-            self.document.evict_distant_pages(cur_page)
-            if (self._render_thread is None or
-                    not self._render_thread.isRunning()):
-                self._start_render_thread(cur_page)
+            old_page = getattr(self, '_last_step_page', -1)
+            if cur_page != old_page:
+                self._last_step_page = cur_page
+                self.document.evict_distant_pages(cur_page)
+                if (self._render_thread is None or
+                        not self._render_thread.isRunning()):
+                    self._start_render_thread(cur_page)
         self.update()
 
     def _jump_pages(self, direction):
@@ -3817,8 +3838,8 @@ class LibraryWidget(QWidget):
         visible = [(b, a) for b, a in zip(books, norm_areas) if a >= MIN_AREA]
         if not visible: visible = [(b, norm_areas[i]) for i, b in enumerate(books)]
 
-        books_list   = [b for b, _ in vis_pairs]
-        areas_list   = [a for _, a in vis_pairs]
+        books_list   = [b for b, _ in visible]
+        areas_list   = [a for _, a in visible]
         rects = _squarify(books_list, areas_list, x, y, w, h, 2, 60, 50)
         self._book_rects = []
 
@@ -4005,55 +4026,6 @@ class LibraryWidget(QWidget):
                     ty += line_h
 
                 self._book_rects.append((rect, b["filepath"]))
-
-        # Clamp cursor
-        if self._cursor_idx >= len(self._book_rects):
-            self._cursor_idx = max(0, len(self._book_rects) - 1)
-
-        mono   = _ui_font(9)
-        mono_b = _ui_font(9, bold=True)
-
-        for idx, (b, rect) in enumerate(visible_pairs):
-            selected = (idx == self._cursor_idx) and not self._cmd_mode
-
-            if selected:
-                interior = AMBER_INV_BG
-                border   = AMBER_BRIGHT
-                txt_col  = AMBER_INV_FG
-            else:
-                interior = AMBER_DARK
-                border   = AMBER
-                txt_col  = AMBER_BRIGHT
-
-            painter.fillRect(rect, interior)
-            painter.setPen(border)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(rect)
-
-            if b["favorite"]:
-                painter.setPen(txt_col)
-                painter.setFont(_ui_font(10))
-                painter.drawText(QRect(rect.x()+rect.width()-20, rect.y()+4, 16, 16),
-                                 Qt.AlignmentFlag.AlignCenter, "★")
-
-            inner  = QRect(rect.x()+8, rect.y()+6, rect.width()-16, rect.height()-12)
-            line_h = 16
-            metar  = f"N{b['notes']}B{b['bookmarks']}H{b['highlights']}R{int(b['line']/max(b['total'],1)*100)}P{b['total_pages']}"
-            texts  = [
-                (metar,       _ui_font(8),            txt_col),
-                (b["title"],  _ui_font(9, bold=True), txt_col),
-                (b["author"], _ui_font(8),            txt_col),
-            ]
-            ty = inner.top()
-            for txt, font, col in texts:
-                if ty + line_h > inner.bottom(): break
-                painter.setFont(font); painter.setPen(col)
-                painter.drawText(rect.x()+8, ty+line_h-2,
-                    QFontMetrics(font).elidedText(
-                        txt, Qt.TextElideMode.ElideRight, inner.width()))
-                ty += line_h
-
-            self._book_rects.append((rect, b["filepath"]))
 
         # Clamp cursor
         if self._cursor_idx >= len(self._book_rects):
