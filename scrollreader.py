@@ -553,30 +553,9 @@ class History:
                 pass
 
     def _save(self):
-        """Debounced save — flushes at most once per 3s, always flushes on close."""
-        now = time.time()
-        if now - getattr(self, '_last_save', 0) >= 3.0:
-            self._flush()
-        else:
-            self._save_pending = True  # picked up by flush_pending()
-
-    def _flush(self):
-        """Atomically write history to disk."""
-        try:
-            APP_DIR.mkdir(parents=True, exist_ok=True)
-            tmp = str(HISTORY_PATH) + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(self.data, f, indent=2)
-            os.replace(tmp, str(HISTORY_PATH))
-        except Exception:
-            pass
-        self._last_save    = time.time()
-        self._save_pending = False
-
-    def flush_pending(self):
-        """Call on app exit to flush any pending debounced save."""
-        if getattr(self, '_save_pending', False):
-            self._flush()
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        with open(HISTORY_PATH, "w") as f:
+            json.dump(self.data, f, indent=2)
 
     def _entry(self, filepath: str) -> dict:
         key = str(filepath)
@@ -851,19 +830,6 @@ class PDFDocument:
                      pix.stride, QImage.Format.Format_RGB888)
         return QPixmap.fromImage(img)
 
-    CACHE_WINDOW = 12   # overridden at load time from config
-    INV_WINDOW   = 6    # overridden at load time from config
-
-    def evict_distant_pages(self, cur_page: int):
-        """Free pixmaps outside the sliding window. Inverted always evicted with normal."""
-        for pn in range(len(self.doc)):
-            dist = abs(pn - cur_page)
-            if dist > self.CACHE_WINDOW:
-                self.page_pixmaps[pn]     = None
-                self.page_pixmaps_inv[pn] = None   # evict together
-            elif dist > self.INV_WINDOW:
-                self.page_pixmaps_inv[pn] = None   # inverted-only evict
-
     def render_range(self, start: int, end: int, inverted: bool = False):
         start = max(0, start)
         end   = min(len(self.doc) - 1, end)
@@ -907,15 +873,11 @@ class RenderThread(QThread):
         self._cancel = True
 
     def run(self):
-        n      = self.document.page_count
-        window = self.document.CACHE_WINDOW
-        inv_w  = self.document.INV_WINDOW
-        order  = _render_order(self.start_page, n)
-
-        # Pass 1: normal render — only within window
+        n     = self.document.page_count
+        order = _render_order(self.start_page, n)
+        # Pass 1: normal render
         for pn in order:
             if self._cancel: return
-            if abs(pn - self.start_page) > window: continue
             if self.document.page_pixmaps[pn] is None:
                 try:
                     pm = self.document.render_page(pn)
@@ -923,14 +885,10 @@ class RenderThread(QThread):
                     self.page_ready.emit(pn, pm)
                 except Exception:
                     pass
-
-        # Pass 2: inverted render — only for pages that are already normally rendered
+        # Pass 2: inverted render (if enabled)
         if self.preload_inv:
             for pn in order:
                 if self._cancel: return
-                if abs(pn - self.start_page) > inv_w: continue
-                # Only invert if normal page is already in cache
-                if self.document.page_pixmaps[pn] is None: continue
                 if self.document.page_pixmaps_inv[pn] is None:
                     try:
                         pm_inv = self.document.render_page_inv(pn)
@@ -991,13 +949,7 @@ class ReaderWidget(QWidget):
         self.cmd.installEventFilter(self)
         self._update_cmd_style()
 
-        # Loading animation
-        self._loading_active   = False
-        self._loading_filename = ""
-        self._loading_frame    = 0
-        self._loading_timer    = QTimer(self)
-        self._loading_timer.timeout.connect(self._loading_tick)
-        self._loading_timer.start(130)
+
 
     def eventFilter(self, obj, event):
         from PyQt6.QtCore import QEvent
@@ -1093,12 +1045,6 @@ class ReaderWidget(QWidget):
         if not os.path.exists(filepath):
             self.status_text = f"file not found: {filepath}"; self.update(); return
 
-        # Show loading animation
-        self._loading_active   = True
-        self._loading_filename = Path(filepath).name
-        self._loading_frame    = 0
-        self.update()
-
         # Cancel any in-progress render
         self._stop_render_thread()
 
@@ -1120,26 +1066,6 @@ class ReaderWidget(QWidget):
             self.history.set_totals(filepath, len(doc.lines), doc.page_count)
 
             self.document     = doc
-            doc.CACHE_WINDOW  = int(self.config.get("cache_window") or 12)
-            doc.INV_WINDOW    = int(self.config.get("inv_window") or 6)
-
-            # Memory guard: cap zoom if pages are very large
-            # Each page at zoom z is approximately (w*z * h*z * 3 bytes)
-            # Cap so that a single page is at most 64MB
-            max_page_mb = 64
-            w_px = doc.natural_width  * doc.zoom
-            h_px = doc.natural_height * doc.zoom
-            page_mb = (w_px * h_px * 3) / (1024 * 1024)
-            if page_mb > max_page_mb:
-                safe_zoom = (max_page_mb * 1024 * 1024 / (doc.natural_width * doc.natural_height * 3)) ** 0.5
-                safe_zoom = max(0.3, round(safe_zoom, 2))
-                self.status_text = f"large file: zoom capped at {safe_zoom:.2f}"
-                QTimer.singleShot(5000, self._clear_status)
-                doc = PDFDocument(filepath, zoom=safe_zoom,
-                                  page_gap=int(self.config.get("page_gap")))
-                doc.CACHE_WINDOW = int(self.config.get("cache_window") or 12)
-                doc.INV_WINDOW   = int(self.config.get("inv_window") or 6)
-                self.document    = doc
             self.current_line = min(self.history.get_line(filepath), max(0, len(doc.lines)-1))
             self.panel        = None
             self._pending     = None
@@ -1176,7 +1102,7 @@ class ReaderWidget(QWidget):
     def _stop_render_thread(self):
         if self._render_thread is not None:
             self._render_thread.cancel()
-            self._render_thread.wait(1000)   # wait up to 1s for clean exit
+            self._render_thread.wait(200)
             self._render_thread = None
 
     def _on_page_ready(self, pn: int, pixmap: QPixmap):
@@ -1201,8 +1127,7 @@ class ReaderWidget(QWidget):
             self.update()
 
     def _on_render_done(self):
-        self._render_thread   = None
-        self._loading_active  = False
+        self._render_thread = None
         self.update()
 
     # ---------------------------------------------------------------- zoom
@@ -1432,11 +1357,9 @@ class ReaderWidget(QWidget):
         self._paint_frame(painter)
         self._paint_top_bar(painter)
         self._paint_bottom_bar(painter)
-        self._paint_activity_meter(painter)
+        self._paint_vu_meter(painter)
 
         # ── Overlays ──────────────────────────────────────────────────────
-        if getattr(self, '_loading_active', False):
-            self._paint_loading_overlay(painter)
         if self.panel and self.panel.get("kind") == "help":
             self._paint_help_panel(painter)
         if self._pending:
@@ -2555,20 +2478,9 @@ class ReaderWidget(QWidget):
 
     def _step(self, delta):
         if not self.document: return
-        old = self.current_line
         self._push_history(self.current_line)
         self.current_line = max(0, min(len(self.document.lines)-1, self.current_line+delta))
         self.history.set_line(self.document.filepath, self.current_line)
-        # Only evict/restart render when page actually changes
-        if self.document.lines:
-            cur_page = self.document.lines[self.current_line].page_num
-            old_page = getattr(self, '_last_step_page', -1)
-            if cur_page != old_page:
-                self._last_step_page = cur_page
-                self.document.evict_distant_pages(cur_page)
-                if (self._render_thread is None or
-                        not self._render_thread.isRunning()):
-                    self._start_render_thread(cur_page)
         self.update()
 
     def _jump_pages(self, direction):
@@ -2763,57 +2675,21 @@ class ReaderWidget(QWidget):
             painter.drawText(px+8, py + item_h - 5, label)
             py += item_h
 
-    def _paint_activity_meter(self, painter: QPainter):
-        """Draw small bottom-to-top progress bars in lower-right of status bar.
-        One bar per active background task — audio meter aesthetic."""
-        tasks = []
-
-        # PDF render thread
-        if self._render_thread and self.document:
-            rendered  = sum(1 for p in self.document.page_pixmaps if p is not None)
-            total_p   = self.document.page_count
-            frac      = rendered / max(total_p, 1)
-            tasks.append(("render", frac, AMBER))
-
-        # Inverted page preload
-        if self._render_thread and self.document:
-            rendered_inv = sum(1 for p in self.document.page_pixmaps_inv if p is not None)
-            total_p      = self.document.page_count
-            frac_inv     = rendered_inv / max(total_p, 1)
-            if frac_inv < 1.0:
-                tasks.append(("invert", frac_inv, AMBER_DIM))
-
-        # Audio recording VU
-        if getattr(self, '_vu_active', False):
-            level = _audio_recorder.vu_level
-            col   = QColor("#ff4444") if level > 0.8 else QColor("#ffbb33") if level > 0.4 else QColor("#44ff88")
-            tasks.append(("audio", level, col))
-
-        if not tasks: return
-
-        w, h     = self.width(), self.height()
-        bar_w    = 6
-        bar_gap  = 3
-        bar_h    = BOTTOM_BAR_H - 6
-        total_w  = len(tasks) * (bar_w + bar_gap) - bar_gap
-        start_x  = w - total_w - 8
-        base_y   = h - BOTTOM_BAR_H + 3
-
-        for i, (name, frac, color) in enumerate(tasks):
-            bx     = start_x + i * (bar_w + bar_gap)
-            # Track
-            painter.fillRect(QRect(bx, base_y, bar_w, bar_h), AMBER_VERY_DIM)
-            # Fill from bottom up
-            fill_h = max(2, int(bar_h * frac))
-            fy     = base_y + bar_h - fill_h
-            c      = QColor(color)
-            painter.fillRect(QRect(bx, fy, bar_w, fill_h), c)
-
-        # Small REC label if recording
-        if getattr(self, '_vu_active', False):
-            painter.setPen(QColor("#ff4444"))
-            painter.setFont(_ui_font(8))
-            painter.drawText(start_x - 30, h - BOTTOM_BAR_H + bar_h - 1, "REC")
+    def _paint_vu_meter(self, painter: QPainter):
+        """Draw a simple VU meter in the status bar during recording."""
+        if not getattr(self, '_vu_active', False): return
+        level  = _audio_recorder.vu_level
+        w, h   = self.width(), self.height()
+        bar_w  = int(level * 80)
+        bar_x  = w - 100
+        bar_y  = h - BOTTOM_BAR_H + 6
+        bar_h  = BOTTOM_BAR_H - 12
+        painter.fillRect(QRect(bar_x, bar_y, 80, bar_h), AMBER_VERY_DIM)
+        col = QColor("#ff4444") if level > 0.8 else QColor("#ffbb33") if level > 0.4 else QColor("#44ff88")
+        painter.fillRect(QRect(bar_x, bar_y, bar_w, bar_h), col)
+        painter.setPen(AMBER_DIM)
+        painter.setFont(_ui_font(8))
+        painter.drawText(bar_x - 30, bar_y + bar_h - 2, "● REC")
 
     def _paint_scrollbar(self, painter: QPainter, mr: QRect, scroll: float, vp: QRect):
         """Draw a classic scrollbar indicator — full margin width, vertical position = doc position."""
@@ -2886,33 +2762,6 @@ class ReaderWidget(QWidget):
                 self._push_history(self.current_line)
                 self.current_line = results[idx]
         self.update()
-
-    def _loading_tick(self):
-        if self._loading_active:
-            self._loading_frame += 1
-            self.update()
-
-    def _paint_loading_overlay(self, painter: QPainter):
-        FRAMES = [' >>>', '> >>', '>> >', '>>> ']
-        arrow  = FRAMES[self._loading_frame % len(FRAMES)]
-        text   = f"{arrow} loading {self._loading_filename}"
-        font   = _ui_font(11, bold=True)
-        fm     = QFontMetrics(font)
-        pw     = fm.horizontalAdvance(text) + 48
-        ph     = 52
-        px     = (self.width()  - pw) // 2
-        py     = (self.height() - ph) // 2
-
-        # Background box
-        painter.fillRect(QRect(px, py, pw, ph), UI_BG)
-        painter.setPen(_mk_pen(AMBER_DARK, self._bw()))
-        painter.drawRect(QRect(px, py, pw, ph))
-
-        # Text centered in box
-        painter.setPen(AMBER_BRIGHT)
-        painter.setFont(font)
-        painter.drawText(QRect(px, py, pw, ph),
-                         Qt.AlignmentFlag.AlignCenter, text)
 
     def _clear_status(self):
         self.status_text = ""
@@ -3537,6 +3386,14 @@ class LibraryWidget(QWidget):
         self._lib_refreshing      = False
         self._lib_refresh_frac    = 0.0
 
+        # Loading animation (shown when opening a book)
+        self._loading_active   = False
+        self._loading_filename = ""
+        self._loading_frame    = 0
+        self._loading_timer    = QTimer(self)
+        self._loading_timer.timeout.connect(self._loading_tick)
+        self._loading_timer.start(130)
+
     def resizeEvent(self, ev):
         self.cmd.setGeometry(0, self.height() - 26, self.width(), 26)
         super().resizeEvent(ev)
@@ -3718,6 +3575,10 @@ class LibraryWidget(QWidget):
         # Status bar
         stat_y = h - LIB_STATUS_H - (26 if self._cmd_mode else 0)
         self._paint_lib_status(painter, 0, stat_y, w)
+
+        # Loading overlay — on top of everything
+        if self._loading_active:
+            self._paint_loading_overlay(painter)
 
     def _paint_tabs(self, painter: QPainter, w: int):
         tw   = w // 4
@@ -4352,8 +4213,42 @@ class LibraryWidget(QWidget):
                 self._cursor_idx = 0
                 self.update()
         else:
-            self.hide()
-            self.open_book.emit(fp)
+            # Show loading overlay, then open after one frame
+            self._loading_active   = True
+            self._loading_filename = Path(fp).name
+            self._loading_frame    = 0
+            self.update()
+            QTimer.singleShot(50, lambda f=fp: self._do_open(f))
+
+    def _do_open(self, fp: str):
+        """Actually open a book after the loading overlay has been painted."""
+        self._loading_active = False
+        self.hide()
+        self.open_book.emit(fp)
+
+    def _loading_tick(self):
+        if self._loading_active:
+            self._loading_frame += 1
+            self.update()
+
+    def _paint_loading_overlay(self, painter: QPainter):
+        """Arrow animation overlay shown when a book is opening."""
+        FRAMES = [' >>>', '> >>', '>> >', '>>> ']
+        arrow  = FRAMES[self._loading_frame % len(FRAMES)]
+        text   = f"{arrow} loading {self._loading_filename}"
+        font   = _ui_font(11, bold=True)
+        fm     = QFontMetrics(font)
+        pw     = fm.horizontalAdvance(text) + 48
+        ph     = 52
+        px     = (self.width()  - pw) // 2
+        py     = (self.height() - ph) // 2
+        painter.fillRect(QRect(px, py, pw, ph), UI_BG)
+        painter.setPen(_mk_pen(AMBER_DARK, 2))
+        painter.drawRect(QRect(px, py, pw, ph))
+        painter.setPen(AMBER_BRIGHT)
+        painter.setFont(font)
+        painter.drawText(QRect(px, py, pw, ph),
+                         Qt.AlignmentFlag.AlignCenter, text)
 
     def _go_back(self):
         """Go back one overflow level, or close if at top."""
@@ -5278,27 +5173,6 @@ class MainWindow(QMainWindow):
         if load_path:
             path = load_path
             QTimer.singleShot(80, lambda: self.reader.load_document(path))
-
-    def closeEvent(self, ev):
-        """Clean shutdown — stop threads, flush pending saves."""
-        # Stop render thread
-        self.reader._stop_render_thread()
-        # Stop library search thread
-        lib = self.library
-        if getattr(lib, '_lib_search_thread', None):
-            lib._lib_search_thread.cancel()
-            lib._lib_search_thread.wait(500)
-        # Stop gamepad timer
-        if hasattr(self, '_gp_timer'):
-            self._gp_timer.stop()
-        if hasattr(self, '_vu_timer'):
-            self._vu_timer.stop()
-        # Stop audio if recording
-        if _audio_recorder.recording:
-            _audio_recorder.stop_and_save("/dev/null")
-        # Flush any pending history save
-        self.reader.history.flush_pending()
-        ev.accept()
 
     def _vu_tick(self):
         r = self.reader
