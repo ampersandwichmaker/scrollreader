@@ -991,6 +991,14 @@ class ReaderWidget(QWidget):
         self.cmd.installEventFilter(self)
         self._update_cmd_style()
 
+        # Loading animation
+        self._loading_active   = False
+        self._loading_filename = ""
+        self._loading_frame    = 0
+        self._loading_timer    = QTimer(self)
+        self._loading_timer.timeout.connect(self._loading_tick)
+        self._loading_timer.start(130)
+
     def eventFilter(self, obj, event):
         from PyQt6.QtCore import QEvent
         if obj is self.cmd and event.type() == QEvent.Type.KeyPress:
@@ -1084,6 +1092,12 @@ class ReaderWidget(QWidget):
         filepath = os.path.expanduser(filepath)
         if not os.path.exists(filepath):
             self.status_text = f"file not found: {filepath}"; self.update(); return
+
+        # Show loading animation
+        self._loading_active   = True
+        self._loading_filename = Path(filepath).name
+        self._loading_frame    = 0
+        self.update()
 
         # Cancel any in-progress render
         self._stop_render_thread()
@@ -1187,7 +1201,8 @@ class ReaderWidget(QWidget):
             self.update()
 
     def _on_render_done(self):
-        self._render_thread = None
+        self._render_thread   = None
+        self._loading_active  = False
         self.update()
 
     # ---------------------------------------------------------------- zoom
@@ -1420,6 +1435,8 @@ class ReaderWidget(QWidget):
         self._paint_activity_meter(painter)
 
         # ── Overlays ──────────────────────────────────────────────────────
+        if getattr(self, '_loading_active', False):
+            self._paint_loading_overlay(painter)
         if self.panel and self.panel.get("kind") == "help":
             self._paint_help_panel(painter)
         if self._pending:
@@ -2869,6 +2886,33 @@ class ReaderWidget(QWidget):
                 self._push_history(self.current_line)
                 self.current_line = results[idx]
         self.update()
+
+    def _loading_tick(self):
+        if self._loading_active:
+            self._loading_frame += 1
+            self.update()
+
+    def _paint_loading_overlay(self, painter: QPainter):
+        FRAMES = [' >>>', '> >>', '>> >', '>>> ']
+        arrow  = FRAMES[self._loading_frame % len(FRAMES)]
+        text   = f"{arrow} loading {self._loading_filename}"
+        font   = _ui_font(11, bold=True)
+        fm     = QFontMetrics(font)
+        pw     = fm.horizontalAdvance(text) + 48
+        ph     = 52
+        px     = (self.width()  - pw) // 2
+        py     = (self.height() - ph) // 2
+
+        # Background box
+        painter.fillRect(QRect(px, py, pw, ph), UI_BG)
+        painter.setPen(_mk_pen(AMBER_DARK, self._bw()))
+        painter.drawRect(QRect(px, py, pw, ph))
+
+        # Text centered in box
+        painter.setPen(AMBER_BRIGHT)
+        painter.setFont(font)
+        painter.drawText(QRect(px, py, pw, ph),
+                         Qt.AlignmentFlag.AlignCenter, text)
 
     def _clear_status(self):
         self.status_text = ""
