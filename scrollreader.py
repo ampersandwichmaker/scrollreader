@@ -2676,20 +2676,49 @@ class ReaderWidget(QWidget):
             py += item_h
 
     def _paint_vu_meter(self, painter: QPainter):
-        """Draw a simple VU meter in the status bar during recording."""
-        if not getattr(self, '_vu_active', False): return
-        level  = _audio_recorder.vu_level
-        w, h   = self.width(), self.height()
-        bar_w  = int(level * 80)
-        bar_x  = w - 100
-        bar_y  = h - BOTTOM_BAR_H + 6
-        bar_h  = BOTTOM_BAR_H - 12
-        painter.fillRect(QRect(bar_x, bar_y, 80, bar_h), AMBER_VERY_DIM)
-        col = QColor("#ff4444") if level > 0.8 else QColor("#ffbb33") if level > 0.4 else QColor("#44ff88")
-        painter.fillRect(QRect(bar_x, bar_y, bar_w, bar_h), col)
-        painter.setPen(AMBER_DIM)
-        painter.setFont(_ui_font(8))
-        painter.drawText(bar_x - 30, bar_y + bar_h - 2, "● REC")
+        """Audio meter aesthetic — one bar per active background task."""
+        tasks = []
+
+        # PDF render thread progress
+        if self._render_thread and self.document:
+            rendered = sum(1 for p in self.document.page_pixmaps if p is not None)
+            frac     = rendered / max(self.document.page_count, 1)
+            tasks.append(("render", frac, AMBER))
+
+        # Inverted page preload
+        if self._render_thread and self.document:
+            rendered_inv = sum(1 for p in self.document.page_pixmaps_inv if p is not None)
+            frac_inv     = rendered_inv / max(self.document.page_count, 1)
+            if frac_inv < 1.0:
+                tasks.append(("invert", frac_inv, AMBER_DIM))
+
+        # Audio recording VU
+        if getattr(self, '_vu_active', False):
+            level = _audio_recorder.vu_level
+            col   = QColor("#ff4444") if level > 0.8 else QColor("#ffbb33") if level > 0.4 else QColor("#44ff88")
+            tasks.append(("audio", level, col))
+
+        if not tasks: return
+
+        w, h    = self.width(), self.height()
+        bar_w   = 6
+        bar_gap = 3
+        bar_h   = BOTTOM_BAR_H - 6
+        total_w = len(tasks) * (bar_w + bar_gap) - bar_gap
+        start_x = w - total_w - 8
+        base_y  = h - BOTTOM_BAR_H + 3
+
+        for i, (name, frac, color) in enumerate(tasks):
+            bx = start_x + i * (bar_w + bar_gap)
+            painter.fillRect(QRect(bx, base_y, bar_w, bar_h), AMBER_VERY_DIM)
+            fill_h = max(2, int(bar_h * frac))
+            fy     = base_y + bar_h - fill_h
+            painter.fillRect(QRect(bx, fy, bar_w, fill_h), QColor(color))
+
+        if getattr(self, '_vu_active', False):
+            painter.setPen(QColor("#ff4444"))
+            painter.setFont(_ui_font(8))
+            painter.drawText(start_x - 30, h - BOTTOM_BAR_H + bar_h - 1, "REC")
 
     def _paint_scrollbar(self, painter: QPainter, mr: QRect, scroll: float, vp: QRect):
         """Draw a classic scrollbar indicator — full margin width, vertical position = doc position."""
@@ -5176,8 +5205,7 @@ class MainWindow(QMainWindow):
 
     def _vu_tick(self):
         r = self.reader
-        if (getattr(r, '_vu_active', False) or
-                r._render_thread is not None):
+        if (getattr(r, '_vu_active', False) or r._render_thread is not None):
             r.update()
         if (self.library.isVisible() and
                 getattr(self.library, '_lib_search_scanning', False)):
