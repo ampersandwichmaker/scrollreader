@@ -1082,6 +1082,7 @@ class ReaderWidget(QWidget):
         # Translation state
         self._translate_mode      = False
         self._translate_word_idx  = 0
+        self._translate_word_xs   = []
         self._translate_result    = ""
         self._translate_fetching  = False
         self._translate_anim_frame= 0
@@ -2973,33 +2974,85 @@ class ReaderWidget(QWidget):
         return self.document.lines[self.current_line].text.split()
 
     def _enter_translate_mode(self):
-        """Enter word selection mode on the current line."""
+        """Enter word selection mode, caching real word positions from PyMuPDF."""
         if not self.document or not self.document.lines: return
         self._translate_mode     = True
         self._translate_word_idx = 0
         self._translate_result   = ""
         self._translate_fetching = False
+        # Cache screen-space x positions using actual PDF word bboxes
+        self._translate_word_xs  = self._build_word_xs()
         self.update()
+
+    def _build_word_xs(self) -> list:
+        """Return list of screen-x positions for each word in the current line,
+        using PyMuPDF get_text('words') for accuracy."""
+        if not self.document or not self.document.lines:
+            return []
+        line     = self.document.lines[self.current_line]
+        page_num = line.page_num
+        zoom     = self.document.zoom
+        px       = self._page_x_offset()
+        scroll   = self._scroll_offset()
+        vp       = self._vp()
+
+        # line.abs_y is in zoomed pixels; convert back to PDF points
+        page_y0 = (line.abs_y / zoom) - (self.document.page_offsets[page_num] / zoom)
+
+        try:
+            page_words = self.document.doc[page_num].get_text("words")
+        except Exception:
+            return []
+
+        # Tolerance: ±half a line height in PDF points
+        tol = (self._lh() / zoom) * 0.75
+
+        # Filter words whose top edge is near our line's y
+        line_words = [w for w in page_words if abs(w[1] - page_y0) < tol]
+        line_words.sort(key=lambda w: w[0])   # sort by x0
+
+        if not line_words:
+            return []
+
+        # Convert PDF x0 coords → screen x
+        xs = [px + int(w[0] * zoom) for w in line_words]
+
+        # Also store the word strings so we can match to our word list
+        self._translate_pdf_words = [w[4] for w in line_words]
+        return xs
+
+    def _translate_word_x(self, word_idx: int) -> int:
+        """Return screen x for word_idx using cached PyMuPDF positions."""
+        xs = getattr(self, '_translate_word_xs', [])
+        if xs and word_idx < len(xs):
+            return xs[word_idx]
+        # Fallback: rough estimate
+        if not self.document or not self.document.lines:
+            return self.width() // 2
+        words  = self._translate_words()
+        px     = self._page_x_offset()
+        char_w = max(4, int(7 * self.document.zoom))
+        prefix = " ".join(words[:word_idx])
+        return px + len(prefix) * char_w + (char_w if word_idx > 0 else 0)
 
     def _exit_translate_mode(self):
         self._translate_mode     = False
         self._translate_fetching = False
         self._translate_result   = ""
+        self._translate_word_xs  = []
         if self._translate_thread:
-            self._translate_thread.cancel() if hasattr(self._translate_thread, 'cancel') else None
             self._translate_thread = None
         self.update()
 
     def _do_translate(self, text: str):
-        """Fire off a translation request for the given text."""
         lang = self.config.get("translate_target_lang") or ""
         if not lang:
             self._translate_result   = "set language: set translate_target_lang <code>"
             self._translate_fetching = False
             self.update()
             return
-        self._translate_result   = ""
-        self._translate_fetching = True
+        self._translate_result     = ""
+        self._translate_fetching   = True
         self._translate_anim_frame = 0
         t = TranslateThread(text, lang, self.config)
         t.result_ready.connect(self._on_translate_result)
@@ -3014,26 +3067,10 @@ class ReaderWidget(QWidget):
         self.update()
 
     def _translate_line(self):
-        """Translate the current line directly (used by :tl command)."""
         if not self.document or not self.document.lines: return
         self._translate_mode   = False
         self._translate_result = ""
         self._do_translate(self.document.lines[self.current_line].text)
-
-    def _translate_word_x(self, word_idx: int) -> int:
-        """Estimate screen x of the start of word_idx in the current line.
-        Best-effort: uses PDF zoom + monospace approximation."""
-        if not self.document or not self.document.lines: return self.width() // 2
-        words = self._translate_words()
-        if not words: return self.width() // 2
-        # Estimate character width in the rendered PDF at current zoom
-        line  = self.document.lines[self.current_line]
-        px    = self._page_x_offset()
-        # Approximate: average char width in the PDF at zoom
-        char_w = max(4, int(7 * self.document.zoom))
-        prefix = " ".join(words[:word_idx])
-        x_off  = len(prefix) * char_w + (char_w if word_idx > 0 else 0)
-        return px + x_off
 
     def _paint_translate_overlay(self, painter: QPainter):
         """Draw the translation overlay box above the current word or line."""
@@ -3085,11 +3122,18 @@ class ReaderWidget(QWidget):
         if self._translate_mode and not self._translate_fetching and not self._translate_result:
             words = self._translate_words()
             if words:
-                wx   = self._translate_word_x(self._translate_word_idx)
-                word = words[self._translate_word_idx]
-                ww   = len(word) * max(4, int(7 * self.document.zoom))
+                idx  = self._translate_word_idx
+                wx   = self._translate_word_x(idx)
+                word = words[idx]
+                # Use real word width from pdf bboxes if available
+                xs   = getattr(self, '_translate_word_xs', [])
+                if xs and idx < len(xs) - 1:
+                    ww = xs[idx + 1] - xs[idx] - 2
+                elif xs and idx == len(xs) - 1:
+                    ww = len(word) * max(4, int(7 * self.document.zoom))
+                else:
+                    ww = len(word) * max(4, int(7 * self.document.zoom))
                 lh   = self._lh()
-                # Rotate hue 180° from the current indicator color
                 ind  = QColor(self._cfg("indicator_color") or "#ffb000")
                 h, s, v, _ = ind.getHsvF()
                 comp = QColor.fromHsvF((h + 0.5) % 1.0, max(0.6, s), max(0.7, v))
