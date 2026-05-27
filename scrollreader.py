@@ -336,6 +336,8 @@ DEFAULT_CONFIG = {
     "help_col_offset":       0,
     "library_flip_mode":     False,
     "eager_pages":           2,             # pages rendered synchronously each side of current
+    "progress_bar_style":    "mini",        # "mini" | "full"
+    "wizard_completed":      False,         # True after first-run wizard is done
     "translate_provider":    "anthropic",   # anthropic | google | google_official | openai | ollama
     "translate_api_key":     "",            # API key for anthropic/google_official/openai
     "translate_target_lang": "",            # e.g. "es", "fr", "de" — empty = prompt to set
@@ -1042,6 +1044,200 @@ class TranslateThread(QThread):
         return data.get("response", "").strip()
 
 
+class WizardOverlay:
+    """Paints a bottom-strip config wizard over the reader. All changes apply live."""
+
+    APP_STEPS = [
+        # (config_key, label, type, choices_or_None, min, max, step)
+        ("current_swatch",    "Colour swatch",        "swatch",  None,           0,   0,   1),
+        ("current_font_idx",  "UI font",               "font",    None,           0,   0,   1),
+        ("ui_font_offset",    "Font size offset",      "int",     None,          -6,  10,   1),
+        ("top_bar_h",         "Top bar height",        "int",     None,          16,  60,   2),
+        ("bottom_bar_h",      "Bottom bar height",     "int",     None,          16,  60,   2),
+        ("panel_w",           "Panel width",           "int",     None,          80, 400,   5),
+        ("ui_border_width",   "Border thickness",      "int",     None,           1,  10,   1),
+        ("indicator_color",   "Indicator/HL color",    "color",   None,           0,   0,   5),
+        ("highlight_height",  "Highlight height",      "int",     None,           4,  60,   2),
+        ("highlight_alpha",   "Highlight opacity",     "int",     None,           0, 255,  10),
+        ("margin_side",       "Margin side",           "choice",  ["right","left"],0,  0,   1),
+        ("progress_bar_style","Progress bar style",    "choice",  ["mini","full"], 0,  0,   1),
+        ("library_dir",       "Library folder",        "path",    None,           0,   0,   0),
+        ("translate_provider","Translate provider",    "choice",
+            ["anthropic","google","google_official","openai","ollama"], 0, 0, 1),
+        ("translate_api_key", "API key",               "text",    None,           0,   0,   0),
+        ("translate_target_lang","Translate language", "text",    None,           0,   0,   0),
+    ]
+
+    BOOK_STEPS = [
+        ("pdf_invert",        "Invert PDF colors",     "bool",    None,           0,   1,   1),
+        ("zoom_mode",         "Zoom mode",             "choice",
+            ["fit-width","fit-page","50%","75%","100%","110%","120%"], 0, 0, 1),
+        ("highlight_height",  "Highlight line height", "int",     None,           4,  60,   2),
+        ("margin_side",       "Margin side",           "choice",  ["right","left"],0,  0,   1),
+    ]
+
+    def __init__(self, kind: str, reader: 'ReaderWidget'):
+        self.kind    = kind   # "app" | "book"
+        self.reader  = reader
+        self.steps   = self.APP_STEPS if kind == "app" else self.BOOK_STEPS
+        self.idx     = 0      # current step index
+        self.done    = False
+
+    def current(self):
+        return self.steps[self.idx]
+
+    def get_val(self):
+        key = self.current()[0]
+        if self.kind == "book" and self.reader.document:
+            e  = self.reader.history._entry(self.reader.document.filepath)
+            ov = e.get("config_overrides", {})
+            if key in ov: return ov[key]
+            if key == "pdf_invert": return e.get("pdf_invert", False)
+        return self.reader.config.get(key)
+
+    def adjust(self, direction: int):
+        key, label, typ, choices, mn, mx, step = self.current()
+        cur = self.get_val()
+        if typ == "swatch":
+            idx = SWATCH_NAMES.index(cur) if cur in SWATCH_NAMES else 0
+            new = SWATCH_NAMES[(idx + direction) % len(SWATCH_NAMES)]
+            self.reader.config.set(key, new)
+            _apply_swatch(new, self.reader.config)
+            self.reader._update_cmd_style()
+        elif typ == "font":
+            fonts = _scan_fonts()
+            if fonts:
+                fidx = int(cur or 0)
+                fidx = (fidx + direction) % len(fonts)
+                fam  = _load_font_by_path(fonts[fidx])
+                _UI_FONT_FAMILY_ref[0] = fam
+                self.reader.config.set(key, str(fidx))
+                self.reader._update_cmd_style()
+        elif typ == "choice" and choices:
+            cidx = choices.index(cur) if cur in choices else 0
+            new  = choices[(cidx + direction) % len(choices)]
+            self._apply(key, new)
+        elif typ == "bool":
+            self._apply(key, not bool(cur))
+        elif typ == "int":
+            self._apply(key, max(int(mn), min(int(mx), int(cur or mn) + direction * int(step))))
+        elif typ == "color":
+            c = QColor(cur or "#ffb000")
+            h, s, v, _ = c.getHsvF()
+            self._apply(key, QColor.fromHsvF((h + direction * step/360) % 1.0, s, v).name())
+        # text and path types: skip left/right (no easy increment)
+        self.reader.update()
+
+    def _apply(self, key: str, val):
+        """Apply live — book overrides go to history, app keys go to config."""
+        if self.kind == "book" and self.reader.document and key != "zoom_mode":
+            fp = self.reader.document.filepath
+            e  = self.reader.history._entry(fp)
+            if key == "pdf_invert":
+                e["pdf_invert"] = val
+                _pdf_invert_ref[0] = bool(val)
+                self.reader.history._save()
+            else:
+                e.setdefault("config_overrides", {})[key] = val
+                self.reader.history._save()
+        else:
+            self.reader.config.set(key, val)
+            # Apply dimension globals immediately
+            global TOP_BAR_H, BOTTOM_BAR_H, PANEL_W
+            if key == "top_bar_h":    TOP_BAR_H    = int(val)
+            elif key == "bottom_bar_h": BOTTOM_BAR_H = int(val)
+            elif key == "panel_w":    PANEL_W      = int(val)
+            if key == "zoom_mode" and self.reader.document:
+                self.reader.zoom_mode = val
+                self.reader._rerender()
+
+    def advance(self):
+        if self.idx < len(self.steps) - 1:
+            self.idx += 1
+        else:
+            self.done = True
+
+    def back(self):
+        if self.idx > 0:
+            self.idx -= 1
+
+    def paint(self, painter: QPainter, w: int, h: int):
+        key, label, typ, choices, mn, mx, step = self.current()
+        cur = self.get_val()
+        n   = len(self.steps)
+
+        # Overlay strip: bottom 35% of viewport
+        oh   = int((h - TOP_BAR_H - BOTTOM_BAR_H) * 0.35)
+        oy   = h - BOTTOM_BAR_H - oh
+        font_b = _ui_font(11, bold=True)
+        font   = _ui_font(10)
+        font_s = _ui_font(9)
+        fm_b   = QFontMetrics(font_b)
+
+        # Background
+        bg = QColor(UI_BG); bg.setAlpha(240)
+        painter.fillRect(QRect(0, oy, w, oh), bg)
+        painter.setPen(_mk_pen(AMBER_BRIGHT, 2))
+        painter.drawLine(0, oy, w, oy)
+
+        # Progress counter
+        painter.setPen(AMBER_DIM)
+        painter.setFont(font_s)
+        painter.drawText(w - 80, oy + 18, f"{self.idx+1} of {n}")
+
+        # Wizard type label
+        kind_lbl = "APP SETUP" if self.kind == "app" else "BOOK SETUP"
+        painter.setPen(AMBER_DARK)
+        painter.setFont(font_s)
+        painter.drawText(16, oy + 18, kind_lbl)
+
+        # Setting label
+        painter.setPen(AMBER)
+        painter.setFont(font_b)
+        painter.drawText(16, oy + 50, label)
+
+        # Current value (large, centered)
+        val_str = self._val_display(key, typ, choices, cur)
+        painter.setPen(AMBER_BRIGHT)
+        painter.setFont(_ui_font(14, bold=True))
+        fm14 = QFontMetrics(_ui_font(14, bold=True))
+        vx   = (w - fm14.horizontalAdvance(val_str)) // 2
+        painter.drawText(vx, oy + 90, val_str)
+
+        # Arrows hint
+        if typ not in ("text", "path"):
+            painter.setPen(AMBER_DIM)
+            painter.setFont(font_s)
+            painter.drawText(16, oy + oh - 28,
+                "←/→ change value   ↑/↓ step through settings   Enter next   Tab skip   Esc close")
+        else:
+            painter.setPen(AMBER_DIM)
+            painter.setFont(font_s)
+            painter.drawText(16, oy + oh - 28,
+                "Enter/Tab to skip (edit via :set command)   Esc close")
+
+        # Step dots
+        dot_total_w = n * 10 - 2
+        dx = (w - dot_total_w) // 2
+        dy = oy + oh - 12
+        for i in range(n):
+            c = AMBER_BRIGHT if i == self.idx else AMBER_VERY_DIM
+            painter.fillRect(QRect(dx + i*10, dy, 8, 4), c)
+
+    def _val_display(self, key, typ, choices, cur) -> str:
+        if typ == "swatch":   return str(cur or "amber")
+        if typ == "font":
+            fonts = _scan_fonts()
+            idx   = int(cur or 0)
+            return os.path.basename(fonts[idx]) if fonts and idx < len(fonts) else "default"
+        if typ == "bool":     return "ON" if cur else "OFF"
+        if typ == "color":    return str(cur or "#ffb000")
+        if typ == "choice":   return str(cur or (choices[0] if choices else ""))
+        if typ == "text":     return str(cur or "(not set)")
+        if typ == "path":     return str(cur or "(not set)")
+        return str(cur or "")
+
+
 class ReaderWidget(QWidget):
     def __init__(self, config: Config, history: History):
         super().__init__()
@@ -1090,6 +1286,9 @@ class ReaderWidget(QWidget):
         self._translate_anim_timer = QTimer(self)
         self._translate_anim_timer.timeout.connect(self._translate_anim_tick)
         self._translate_anim_timer.start(130)
+
+        # Wizard state
+        self._wizard: Optional['WizardOverlay'] = None
     def eventFilter(self, obj, event):
         from PyQt6.QtCore import QEvent
         if obj is self.cmd and event.type() == QEvent.Type.KeyPress:
@@ -1200,6 +1399,7 @@ class ReaderWidget(QWidget):
             # Metadata
             meta = doc.doc.metadata
             e    = self.history._entry(filepath)
+            is_new_book = e.get("status") == "unread" and e.get("line", 0) == 0 and e.get("total_lines") is None
             if meta.get("title")  and not e.get("title"):  e["title"]  = meta["title"]
             if meta.get("author") and not e.get("author"): e["author"] = meta["author"]
             self.history.set_totals(filepath, len(doc.lines), doc.page_count)
@@ -1224,6 +1424,10 @@ class ReaderWidget(QWidget):
 
             # Background-render the rest
             self._start_render_thread(cur_page)
+
+            # Per-book wizard on first open
+            if is_new_book:
+                QTimer.singleShot(100, lambda: self._open_wizard("book"))
 
         except Exception as ex:
             self.status_text = f"error: {ex}"; self.update()
@@ -1507,6 +1711,8 @@ class ReaderWidget(QWidget):
             self._paint_config_popup(painter)
         if self._translate_mode or self._translate_fetching or self._translate_result:
             self._paint_translate_overlay(painter)
+        if self._wizard:
+            self._wizard.paint(painter, self.width(), self.height())
 
     # ── Frame & bars ──────────────────────────────────────────────────────
 
@@ -2254,6 +2460,28 @@ class ReaderWidget(QWidget):
         k    = ev.key()
         ctrl = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
 
+        # ── Wizard overlay — eats all input ──────────────────────────────
+        if self._wizard and not self._wizard.done:
+            wz = self._wizard
+            typ = wz.current()[2]
+            if k == Qt.Key.Key_Escape or k == Qt.Key.Key_Tab:
+                self._close_wizard()
+            elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                wz.advance()
+                if wz.done: self._close_wizard()
+                else: self.update()
+            elif k in (Qt.Key.Key_Left, Qt.Key.Key_A) and typ not in ("text","path"):
+                wz.adjust(-1)
+            elif k in (Qt.Key.Key_Right, Qt.Key.Key_D) and typ not in ("text","path"):
+                wz.adjust(1)
+            elif k in (Qt.Key.Key_Up, Qt.Key.Key_W):
+                wz.back(); self.update()
+            elif k in (Qt.Key.Key_Down, Qt.Key.Key_S):
+                wz.advance()
+                if wz.done: self._close_wizard()
+                else: self.update()
+            return   # eat everything else
+
         # ── Translation word selection mode ───────────────────────────────
         if self._translate_mode and not self._translate_fetching:
             if self._translate_result:
@@ -2845,23 +3073,30 @@ class ReaderWidget(QWidget):
             py += item_h
 
     def _paint_vu_meter(self, painter: QPainter):
-        """Audio meter aesthetic — one bar per active background task."""
+        """Progress bars — mini (audio meter) or full (big margin bar)."""
+        style = self.config.get("progress_bar_style") or "mini"
+
+        # Gather render progress
+        render_frac = 0.0
+        inv_frac    = 0.0
+        rendering   = self._render_thread is not None and self.document is not None
+        if rendering:
+            render_frac = sum(1 for p in self.document.page_pixmaps if p is not None) / max(self.document.page_count, 1)
+            inv_frac    = sum(1 for p in self.document.page_pixmaps_inv if p is not None) / max(self.document.page_count, 1)
+
+        if style == "full" and rendering:
+            self._paint_full_bar(painter, render_frac, inv_frac)
+            # Still draw audio VU in mini style on top if recording
+            if getattr(self, '_vu_active', False):
+                self._paint_audio_vu(painter)
+            return
+
+        # Mini style — audio meter bars
         tasks = []
-
-        # PDF render thread progress
-        if self._render_thread and self.document:
-            rendered = sum(1 for p in self.document.page_pixmaps if p is not None)
-            frac     = rendered / max(self.document.page_count, 1)
-            tasks.append(("render", frac, AMBER))
-
-        # Inverted page preload
-        if self._render_thread and self.document:
-            rendered_inv = sum(1 for p in self.document.page_pixmaps_inv if p is not None)
-            frac_inv     = rendered_inv / max(self.document.page_count, 1)
-            if frac_inv < 1.0:
-                tasks.append(("invert", frac_inv, AMBER_DIM))
-
-        # Audio recording VU
+        if rendering:
+            tasks.append(("render", render_frac, AMBER))
+            if inv_frac < 1.0:
+                tasks.append(("invert", inv_frac, AMBER_DIM))
         if getattr(self, '_vu_active', False):
             level = _audio_recorder.vu_level
             col   = QColor("#ff4444") if level > 0.8 else QColor("#ffbb33") if level > 0.4 else QColor("#44ff88")
@@ -2888,6 +3123,46 @@ class ReaderWidget(QWidget):
             painter.setPen(QColor("#ff4444"))
             painter.setFont(_ui_font(8))
             painter.drawText(start_x - 30, h - BOTTOM_BAR_H + bar_h - 1, "REC")
+
+    def _paint_full_bar(self, painter: QPainter, render_frac: float, inv_frac: float):
+        """Full-margin progress bar: fills on render, drains on invert preload."""
+        mr    = self._margin_rect()
+        track_x = mr.left() + 2
+        track_w = mr.width() - 4
+        track_y = mr.top()
+        track_h = mr.height()
+
+        ind = QColor(self._cfg("indicator_color") or "#ffb000")
+
+        # Render pass: fill bottom→top
+        fill_h = int(track_h * render_frac)
+        if fill_h > 0:
+            c = QColor(ind); c.setAlpha(80)
+            painter.fillRect(QRect(track_x, track_y + track_h - fill_h,
+                                   track_w, fill_h), c)
+
+        # Invert pass: drain from top — remove top portion proportional to inv progress
+        if inv_frac > 0:
+            drain_h = int(track_h * inv_frac)
+            # Clear the top drain_h pixels of the filled area
+            painter.fillRect(QRect(track_x, track_y + track_h - fill_h,
+                                   track_w, min(drain_h, fill_h)), UI_BG)
+
+    def _paint_audio_vu(self, painter: QPainter):
+        """Mini audio VU bar (used alongside full-bar mode)."""
+        level  = _audio_recorder.vu_level
+        w, h   = self.width(), self.height()
+        bar_w  = 6
+        bar_h  = BOTTOM_BAR_H - 6
+        bx     = w - bar_w - 8
+        base_y = h - BOTTOM_BAR_H + 3
+        col    = QColor("#ff4444") if level > 0.8 else QColor("#ffbb33") if level > 0.4 else QColor("#44ff88")
+        painter.fillRect(QRect(bx, base_y, bar_w, bar_h), AMBER_VERY_DIM)
+        fill_h = max(2, int(bar_h * level))
+        painter.fillRect(QRect(bx, base_y + bar_h - fill_h, bar_w, fill_h), col)
+        painter.setPen(QColor("#ff4444"))
+        painter.setFont(_ui_font(8))
+        painter.drawText(bx - 30, h - BOTTOM_BAR_H + bar_h - 1, "REC")
 
     def _paint_scrollbar(self, painter: QPainter, mr: QRect, scroll: float, vp: QRect):
         """Draw a classic scrollbar indicator — full margin width, vertical position = doc position."""
@@ -3140,6 +3415,49 @@ class ReaderWidget(QWidget):
                 comp.setAlpha(120)
                 painter.fillRect(QRect(wx, ind_y, ww, lh), comp)
 
+    # ── Wizards ───────────────────────────────────────────────────────────
+
+    def _middle_line(self) -> int:
+        """Return the line index at the middle page, middle text line."""
+        if not self.document or not self.document.lines: return 0
+        mid_page  = self.document.page_count // 2
+        # Walk outward from mid_page to find a page with text lines
+        for delta in range(self.document.page_count):
+            for pn in [mid_page + delta, mid_page - delta]:
+                if 0 <= pn < self.document.page_count:
+                    page_lines = [i for i, l in enumerate(self.document.lines)
+                                  if l.page_num == pn]
+                    if page_lines:
+                        return page_lines[len(page_lines) // 2]
+        return 0
+
+    def _open_wizard(self, kind: str):
+        """Open a wizard overlay. Suppresses status changes during book wizard."""
+        self._wizard = WizardOverlay(kind, self)
+        if kind == "book" and self.document:
+            # Jump to middle-page preview, suppress status promotion
+            self._wizard_pre_line   = self.current_line
+            self._wizard_active     = True
+            self.current_line       = self._middle_line()
+        self.update()
+
+    def _close_wizard(self):
+        """Close wizard, restore line, mark app wizard done."""
+        wz = self._wizard
+        self._wizard = None
+        if wz and wz.kind == "app":
+            self.config.set("wizard_completed", True)
+        if getattr(self, '_wizard_active', False):
+            self._wizard_active = False
+            self.current_line   = getattr(self, '_wizard_pre_line', 0)
+            # Restore unread status if book was never actually read
+            if self.document:
+                e = self.history._entry(self.document.filepath)
+                if e.get("line", 0) == 0:
+                    e["status"] = "unread"
+                    self.history._save()
+        self.update()
+
     def _clear_status(self):
         self.status_text = ""
         self.update()
@@ -3224,6 +3542,11 @@ class ReaderWidget(QWidget):
             if not self.document: return "no document open"
             self._translate_line()
             return None
+        if cmd in ("wizard", "setup"):
+            self._open_wizard("app"); return None
+        if cmd in ("bookwizard", "bwizard"):
+            if not self.document: return "no document open"
+            self._open_wizard("book"); return None
         if cmd in ("help","man","?"):        return self._open_panel("ScrollReader — Command Reference", "help")
 
         # Search commands
@@ -5682,6 +6005,9 @@ def main():
     window  = MainWindow(config, history, initial_file=initial)
     window.showMaximized()
     window.reader.setFocus()
+    # First-run wizard
+    if not config.get("wizard_completed"):
+        QTimer.singleShot(200, lambda: window.reader._open_wizard("app"))
     sys.exit(app.exec())
 
 
