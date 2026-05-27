@@ -336,6 +336,11 @@ DEFAULT_CONFIG = {
     "help_col_offset":       0,
     "library_flip_mode":     False,
     "eager_pages":           2,             # pages rendered synchronously each side of current
+    "translate_provider":    "anthropic",   # anthropic | google | google_official | openai | ollama
+    "translate_api_key":     "",            # API key for anthropic/google_official/openai
+    "translate_target_lang": "",            # e.g. "es", "fr", "de" — empty = prompt to set
+    "translate_ollama_host": "http://localhost:11434",
+    "translate_ollama_model":"qwen3:8b",
 }
 
 ZOOM_MODES   = ["fit-width", "fit-page", "50%", "75%", "100%", "110%", "120%"]
@@ -912,6 +917,131 @@ def _render_order(start: int, total: int) -> list[int]:
 # Reader Widget
 # ---------------------------------------------------------------------------
 
+class TranslateThread(QThread):
+    """Background thread that calls a translation API and emits the result."""
+    result_ready = pyqtSignal(str)   # translated text or error message
+
+    def __init__(self, text: str, target_lang: str, config: 'Config'):
+        super().__init__()
+        self.text        = text
+        self.target_lang = target_lang
+        self.config      = config
+
+    def run(self):
+        try:
+            result = self._translate()
+            self.result_ready.emit(result)
+        except Exception as ex:
+            self.result_ready.emit(f"[error: {ex}]")
+
+    def _translate(self) -> str:
+        provider = (self.config.get("translate_provider") or "anthropic").lower()
+        text     = self.text.strip()
+        lang     = self.target_lang
+
+        if provider == "anthropic":
+            return self._call_anthropic(text, lang)
+        elif provider == "google":
+            return self._call_google_unofficial(text, lang)
+        elif provider == "google_official":
+            return self._call_google_official(text, lang)
+        elif provider == "openai":
+            return self._call_openai(text, lang)
+        elif provider == "ollama":
+            return self._call_ollama(text, lang)
+        else:
+            return f"[unknown provider: {provider}]"
+
+    def _call_anthropic(self, text: str, lang: str) -> str:
+        import urllib.request, json
+        key = self.config.get("translate_api_key") or ""
+        if not key:
+            return "[set translate_api_key to use Anthropic]"
+        payload = json.dumps({
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 256,
+            "system": f"Translate to {lang}. Reply with only the translation, no explanation.",
+            "messages": [{"role": "user", "content": text}]
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={
+                "x-api-key": key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        return data["content"][0]["text"].strip()
+
+    def _call_google_unofficial(self, text: str, lang: str) -> str:
+        import urllib.request, urllib.parse, json
+        params = urllib.parse.urlencode({
+            "client": "gtx", "sl": "auto", "tl": lang,
+            "dt": "t", "q": text
+        })
+        url = f"https://translate.googleapis.com/translate_a/single?{params}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        return "".join(part[0] for part in data[0] if part[0]).strip()
+
+    def _call_google_official(self, text: str, lang: str) -> str:
+        import urllib.request, urllib.parse, json
+        key = self.config.get("translate_api_key") or ""
+        if not key:
+            return "[set translate_api_key to use Google official API]"
+        params = urllib.parse.urlencode({"key": key, "q": text, "target": lang})
+        url    = f"https://translation.googleapis.com/language/translate/v2?{params}"
+        with urllib.request.urlopen(url, timeout=10) as r:
+            data = json.loads(r.read())
+        return data["data"]["translations"][0]["translatedText"].strip()
+
+    def _call_openai(self, text: str, lang: str) -> str:
+        import urllib.request, json
+        key = self.config.get("translate_api_key") or ""
+        if not key:
+            return "[set translate_api_key to use OpenAI]"
+        payload = json.dumps({
+            "model": "gpt-4o-mini",
+            "max_tokens": 256,
+            "messages": [
+                {"role": "system",
+                 "content": f"Translate to {lang}. Reply with only the translation."},
+                {"role": "user", "content": text}
+            ]
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=payload,
+            headers={"Authorization": f"Bearer {key}",
+                     "Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        return data["choices"][0]["message"]["content"].strip()
+
+    def _call_ollama(self, text: str, lang: str) -> str:
+        import urllib.request, json
+        host  = (self.config.get("translate_ollama_host") or "http://localhost:11434").rstrip("/")
+        model = self.config.get("translate_ollama_model") or "qwen3:8b"
+        payload = json.dumps({
+            "model": model,
+            "prompt": f"Translate to {lang}. Reply with only the translation.\n\n{text}",
+            "stream": False
+        }).encode()
+        req = urllib.request.Request(
+            f"{host}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read())
+        return data.get("response", "").strip()
+
+
 class ReaderWidget(QWidget):
     def __init__(self, config: Config, history: History):
         super().__init__()
@@ -949,8 +1079,16 @@ class ReaderWidget(QWidget):
         self.cmd.installEventFilter(self)
         self._update_cmd_style()
 
-
-
+        # Translation state
+        self._translate_mode      = False
+        self._translate_word_idx  = 0
+        self._translate_result    = ""
+        self._translate_fetching  = False
+        self._translate_anim_frame= 0
+        self._translate_thread: Optional[TranslateThread] = None
+        self._translate_anim_timer = QTimer(self)
+        self._translate_anim_timer.timeout.connect(self._translate_anim_tick)
+        self._translate_anim_timer.start(130)
     def eventFilter(self, obj, event):
         from PyQt6.QtCore import QEvent
         if obj is self.cmd and event.type() == QEvent.Type.KeyPress:
@@ -1366,6 +1504,8 @@ class ReaderWidget(QWidget):
             self._paint_confirm(painter)
         if getattr(self, '_config_popup_open', False):
             self._paint_config_popup(painter)
+        if self._translate_mode or self._translate_fetching or self._translate_result:
+            self._paint_translate_overlay(painter)
 
     # ── Frame & bars ──────────────────────────────────────────────────────
 
@@ -2113,6 +2253,32 @@ class ReaderWidget(QWidget):
         k    = ev.key()
         ctrl = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
 
+        # ── Translation word selection mode ───────────────────────────────
+        if self._translate_mode and not self._translate_fetching:
+            if self._translate_result:
+                # Any key dismisses the result
+                self._exit_translate_mode(); return
+            words = self._translate_words()
+            n     = len(words)
+            if k == Qt.Key.Key_Escape:
+                self._exit_translate_mode(); return
+            elif k in (Qt.Key.Key_Left, Qt.Key.Key_A):
+                self._translate_word_idx = max(0, self._translate_word_idx - 1)
+                self.update(); return
+            elif k in (Qt.Key.Key_Right, Qt.Key.Key_D):
+                self._translate_word_idx = min(n - 1, self._translate_word_idx + 1)
+                self.update(); return
+            elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+                if words:
+                    self._do_translate(words[self._translate_word_idx])
+                return
+            return  # eat all other keys in translate mode
+
+        # Dismiss translation result on any reading key
+        if self._translate_result and not self._translate_fetching:
+            self._translate_result = ""
+            self.update()
+
         # ── Search panel ──────────────────────────────────────────────────
         if getattr(self, '_search_panel_active', False):
             input_active = getattr(self, '_search_input_active', False)
@@ -2441,6 +2607,8 @@ class ReaderWidget(QWidget):
             self._open_annot_panel("bookmarks")
         elif k == Qt.Key.Key_H:
             self._open_annot_panel("highlights")
+        elif k == Qt.Key.Key_T:
+            self._enter_translate_mode()
         elif k == Qt.Key.Key_R:
             # Return to reading mode — close any open panel (no-op if already reading)
             if self._panel_mode:
@@ -2792,6 +2960,137 @@ class ReaderWidget(QWidget):
                 self.current_line = results[idx]
         self.update()
 
+    # ── Translation ───────────────────────────────────────────────────────
+
+    def _translate_anim_tick(self):
+        if self._translate_fetching:
+            self._translate_anim_frame += 1
+            self.update()
+
+    def _translate_words(self) -> list:
+        """Split current line text into words."""
+        if not self.document or not self.document.lines: return []
+        return self.document.lines[self.current_line].text.split()
+
+    def _enter_translate_mode(self):
+        """Enter word selection mode on the current line."""
+        if not self.document or not self.document.lines: return
+        self._translate_mode     = True
+        self._translate_word_idx = 0
+        self._translate_result   = ""
+        self._translate_fetching = False
+        self.update()
+
+    def _exit_translate_mode(self):
+        self._translate_mode     = False
+        self._translate_fetching = False
+        self._translate_result   = ""
+        if self._translate_thread:
+            self._translate_thread.cancel() if hasattr(self._translate_thread, 'cancel') else None
+            self._translate_thread = None
+        self.update()
+
+    def _do_translate(self, text: str):
+        """Fire off a translation request for the given text."""
+        lang = self.config.get("translate_target_lang") or ""
+        if not lang:
+            self._translate_result   = "set language: set translate_target_lang <code>"
+            self._translate_fetching = False
+            self.update()
+            return
+        self._translate_result   = ""
+        self._translate_fetching = True
+        self._translate_anim_frame = 0
+        t = TranslateThread(text, lang, self.config)
+        t.result_ready.connect(self._on_translate_result)
+        self._translate_thread = t
+        t.start()
+        self.update()
+
+    def _on_translate_result(self, text: str):
+        self._translate_result   = text
+        self._translate_fetching = False
+        self._translate_thread   = None
+        self.update()
+
+    def _translate_line(self):
+        """Translate the current line directly (used by :tl command)."""
+        if not self.document or not self.document.lines: return
+        self._translate_mode   = False
+        self._translate_result = ""
+        self._do_translate(self.document.lines[self.current_line].text)
+
+    def _translate_word_x(self, word_idx: int) -> int:
+        """Estimate screen x of the start of word_idx in the current line.
+        Best-effort: uses PDF zoom + monospace approximation."""
+        if not self.document or not self.document.lines: return self.width() // 2
+        words = self._translate_words()
+        if not words: return self.width() // 2
+        # Estimate character width in the rendered PDF at current zoom
+        line  = self.document.lines[self.current_line]
+        px    = self._page_x_offset()
+        # Approximate: average char width in the PDF at zoom
+        char_w = max(4, int(7 * self.document.zoom))
+        prefix = " ".join(words[:word_idx])
+        x_off  = len(prefix) * char_w + (char_w if word_idx > 0 else 0)
+        return px + x_off
+
+    def _paint_translate_overlay(self, painter: QPainter):
+        """Draw the translation overlay box above the current word or line."""
+        ANIM = [' >>>', '> >>', '>> >', '>>> ']
+        font   = _ui_font(10, bold=True)
+        fm     = QFontMetrics(font)
+        vp     = self._vp()
+        ind_y  = self._indicator_screen_y()
+        box_h  = 36
+
+        if self._translate_fetching:
+            arrow = ANIM[self._translate_anim_frame % len(ANIM)]
+            disp  = f"{arrow} translating..."
+        elif self._translate_result:
+            disp  = self._translate_result
+        elif self._translate_mode:
+            words = self._translate_words()
+            if words:
+                disp = f"[ {words[self._translate_word_idx]} ]  ←/→ select  Enter confirm  Esc cancel"
+            else:
+                disp = "(empty line)"
+        else:
+            return
+
+        pw  = min(fm.horizontalAdvance(disp) + 40, vp.width() - 20)
+        box_y = max(vp.top() + 4, ind_y - box_h - 8)
+
+        # X position: above word if in word mode, else centered
+        if self._translate_mode and not self._translate_fetching and not self._translate_result:
+            raw_x = self._translate_word_x(self._translate_word_idx)
+            px    = max(vp.left() + 4, min(vp.right() - pw - 4, raw_x))
+        else:
+            px = vp.left() + (vp.width() - pw) // 2
+
+        # Background + border
+        painter.fillRect(QRect(px, box_y, pw, box_h), UI_BG)
+        painter.setPen(_mk_pen(AMBER_BRIGHT, self._bw()))
+        painter.drawRect(QRect(px, box_y, pw, box_h))
+
+        # Text
+        painter.setPen(AMBER_BRIGHT)
+        painter.setFont(font)
+        painter.drawText(QRect(px + 10, box_y, pw - 14, box_h),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         disp)
+
+        # Highlight the selected word in the line below (word mode only)
+        if self._translate_mode and not self._translate_fetching and not self._translate_result:
+            words = self._translate_words()
+            if words:
+                wx    = self._translate_word_x(self._translate_word_idx)
+                word  = words[self._translate_word_idx]
+                ww    = len(word) * max(4, int(7 * self.document.zoom))
+                lh    = self._lh()
+                hl    = QColor(AMBER_BRIGHT); hl.setAlpha(80)
+                painter.fillRect(QRect(wx, ind_y, ww, lh), hl)
+
     def _clear_status(self):
         self.status_text = ""
         self.update()
@@ -2872,6 +3171,10 @@ class ReaderWidget(QWidget):
             flip = not bool(self.config.get("library_flip_mode"))
             self.config.set("library_flip_mode", flip)
             return f"library sizing: {'pages read' if flip else 'pages remaining'}"
+        if cmd in ("tl", "translateline"):
+            if not self.document: return "no document open"
+            self._translate_line()
+            return None
         if cmd in ("help","man","?"):        return self._open_panel("ScrollReader — Command Reference", "help")
 
         # Search commands
