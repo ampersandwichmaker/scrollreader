@@ -3061,11 +3061,12 @@ class ReaderWidget(QWidget):
         pw  = min(fm.horizontalAdvance(disp) + 40, vp.width() - 20)
         box_y = max(vp.top() + 4, ind_y - box_h - 8)
 
-        # X position: above word if in word mode, else centered
-        if self._translate_mode and not self._translate_fetching and not self._translate_result:
+        # X position: above word in all translate modes (word-aligned, not centered)
+        if self._translate_mode:
             raw_x = self._translate_word_x(self._translate_word_idx)
             px    = max(vp.left() + 4, min(vp.right() - pw - 4, raw_x))
         else:
+            # :tl line mode — centered
             px = vp.left() + (vp.width() - pw) // 2
 
         # Background + border
@@ -3080,16 +3081,20 @@ class ReaderWidget(QWidget):
                          Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                          disp)
 
-        # Highlight the selected word in the line below (word mode only)
+        # Highlight the selected word — complementary color (180° offset) from indicator
         if self._translate_mode and not self._translate_fetching and not self._translate_result:
             words = self._translate_words()
             if words:
-                wx    = self._translate_word_x(self._translate_word_idx)
-                word  = words[self._translate_word_idx]
-                ww    = len(word) * max(4, int(7 * self.document.zoom))
-                lh    = self._lh()
-                hl    = QColor(AMBER_BRIGHT); hl.setAlpha(80)
-                painter.fillRect(QRect(wx, ind_y, ww, lh), hl)
+                wx   = self._translate_word_x(self._translate_word_idx)
+                word = words[self._translate_word_idx]
+                ww   = len(word) * max(4, int(7 * self.document.zoom))
+                lh   = self._lh()
+                # Rotate hue 180° from the current indicator color
+                ind  = QColor(self._cfg("indicator_color") or "#ffb000")
+                h, s, v, _ = ind.getHsvF()
+                comp = QColor.fromHsvF((h + 0.5) % 1.0, max(0.6, s), max(0.7, v))
+                comp.setAlpha(120)
+                painter.fillRect(QRect(wx, ind_y, ww, lh), comp)
 
     def _clear_status(self):
         self.status_text = ""
