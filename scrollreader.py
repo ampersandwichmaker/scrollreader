@@ -1642,6 +1642,8 @@ class ReaderWidget(QWidget):
             painter.drawText(vp, Qt.AlignmentFlag.AlignCenter,
                              "ENTER COMMAND MODE AND TYPE:  OPEN <PATH>")
             self._paint_frame(painter)
+            if self._wizard:
+                self._wizard.paint(painter, self.width(), self.height())
             return
 
         scroll = self._scroll_offset()
