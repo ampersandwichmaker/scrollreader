@@ -1206,34 +1206,53 @@ class WizardOverlay:
         ("zoom_mode",         "Zoom mode",             "choice",
             ["fit-width","fit-page","50%","75%","100%","110%","120%"], 0, 0, 1),
         ("indicator_color",   "Line indicator color",  "color",   None,           0,   0,   5),
-        ("highlight_height",  "Highlight line height", "int",     None,           4,  60,   2),
+        ("highlight_height",  "Highlight line height", "int",     None,           4, 100,   2),
         ("highlight_alpha",   "Highlight opacity",     "int",     None,           0, 255,  10),
         ("margin_side",       "Margin side",           "choice",  ["right","left"],0,  0,   1),
     ]
 
+    # Sentinel step used as a visual section divider in combined mode
+    SECTION_DIVIDER = ("__section__", "", "divider", None, 0, 0, 0)
+
     def __init__(self, kind: str, reader: 'ReaderWidget'):
-        self.kind    = kind   # "app" | "book"
+        self.kind    = kind   # "app" | "book" | "combined"
         self.reader  = reader
-        self.steps   = self.APP_STEPS if kind == "app" else self.BOOK_STEPS
+        if kind == "combined":
+            self.steps = (
+                self.APP_STEPS +
+                [("__section__", "── PER-BOOK SETTINGS ──", "divider", None, 0, 0, 0)] +
+                self.BOOK_STEPS
+            )
+        elif kind == "book":
+            self.steps = self.BOOK_STEPS
+        else:
+            self.steps = self.APP_STEPS
         self.idx     = 0      # current step index
         self.done    = False
         self._scroll_offset  = 0
-        self._text_editing   = False   # True when typing into a text/path field
-        self._text_buffer    = ""      # current edit buffer
+        self._text_editing   = False
+        self._text_buffer    = ""
 
     def current(self):
         return self.steps[self.idx]
 
+    def _is_divider(self, idx: int) -> bool:
+        return self.steps[idx][2] == "divider"
+
+    def _nav(self, direction: int):
+        """Move idx by direction, skipping any divider rows."""
+        n   = len(self.steps)
+        new = self.idx + direction
+        while 0 <= new < n and self._is_divider(new):
+            new += direction
+        if 0 <= new < n:
+            self.idx = new
+
     def get_val(self):
-        key = self.current()[0]
-        if self.kind == "book" and self.reader.document:
-            e  = self.reader.history._entry(self.reader.document.filepath)
-            ov = e.get("config_overrides", {})
-            if key in ov: return ov[key]
-            if key == "pdf_invert": return e.get("pdf_invert", False)
-        return self.reader.config.get(key)
+        return self._get_val_for(self.idx)
 
     def adjust(self, direction: int):
+        if self._is_divider(self.idx): return
         key, label, typ, choices, mn, mx, step = self.current()
         cur = self.get_val()
         if typ == "swatch":
@@ -1268,7 +1287,8 @@ class WizardOverlay:
 
     def _apply(self, key: str, val):
         """Apply live — book overrides go to history, app keys go to config."""
-        if self.kind == "book" and self.reader.document and key != "zoom_mode":
+        step_kind = self._step_kind(self.idx)
+        if step_kind == "book" and self.reader.document and key != "zoom_mode":
             fp = self.reader.document.filepath
             e  = self.reader.history._entry(fp)
             if key == "pdf_invert":
@@ -1332,7 +1352,7 @@ class WizardOverlay:
         painter.drawLine(vx, oy, vx + vw, oy)
 
         # Header row
-        kind_lbl = "APP SETUP" if self.kind == "app" else "BOOK SETUP"
+        kind_lbl = "APP + BOOK SETTINGS" if self.kind == "combined" else ("APP SETUP" if self.kind == "app" else "BOOK SETUP")
         painter.setPen(AMBER_DARK)
         painter.setFont(font_s)
         painter.drawText(vx + PAD, oy + 14, kind_lbl)
@@ -1365,7 +1385,15 @@ class WizardOverlay:
             selected = (i == self.idx)
             editing  = selected and self._text_editing
 
-            # Row background
+            # Divider / section header row
+            if typ == "divider":
+                painter.fillRect(QRect(vx, row_y, vw, ROW_H), QColor(20, 16, 0))
+                painter.setFont(_ui_font(9, bold=True))
+                painter.setPen(AMBER_DARK)
+                painter.drawText(vx + PAD, row_y + ROW_H - 7, label)
+                painter.setPen(_mk_pen(AMBER_DARK, 1))
+                painter.drawLine(vx, row_y + ROW_H - 1, vx + vw, row_y + ROW_H - 1)
+                continue
             if selected:
                 bg_col = QColor(AMBER.red(), AMBER.green(), AMBER.blue(), 35 if editing else 20)
                 painter.fillRect(QRect(vx, row_y, vw, ROW_H), bg_col)
@@ -1470,13 +1498,27 @@ class WizardOverlay:
 
     def _get_val_for(self, idx: int):
         """Get current value for step at index idx."""
-        key = self.steps[idx][0]
-        if self.kind == "book" and self.reader.document:
+        key  = self.steps[idx][0]
+        # In combined mode, BOOK_STEPS entries read from book overrides if a doc is open
+        kind = self._step_kind(idx)
+        if kind == "book" and self.reader.document:
             e  = self.reader.history._entry(self.reader.document.filepath)
             ov = e.get("config_overrides", {})
             if key in ov: return ov[key]
             if key == "pdf_invert": return e.get("pdf_invert", False)
         return self.reader.config.get(key)
+
+    def _step_kind(self, idx: int) -> str:
+        """Return 'book' if this step index is in the BOOK_STEPS section, else 'app'."""
+        if self.kind == "book":
+            return "book"
+        if self.kind == "app":
+            return "app"
+        # combined: steps after the divider are book steps
+        for i, step in enumerate(self.steps):
+            if step[2] == "divider" and idx > i:
+                return "book"
+        return "app"
 
     def _val_display(self, key, typ, choices, cur) -> str:
         if typ == "swatch":   return str(cur or "amber")
@@ -2012,10 +2054,11 @@ class ReaderWidget(QWidget):
         font   = _ui_font(9)
         ty     = TOP_BAR_H - 8
 
-        # Close button — square flush to true top-right corner of window
-        btn_sz = TOP_BAR_H
-        btn_x  = w - btn_sz
-        self._close_btn_rect = QRect(btn_x, 0, btn_sz, btn_sz)
+        # Close button — smaller than full bar height, flush top-right, centered vertically
+        btn_sz = max(12, TOP_BAR_H - 8)
+        btn_y  = (TOP_BAR_H - btn_sz) // 2
+        btn_x  = w - btn_sz - 2
+        self._close_btn_rect = QRect(btn_x, btn_y, btn_sz, btn_sz)
         bw = self._bw()
         painter.setPen(_mk_pen(AMBER_DARK, bw))
         painter.drawRect(self._close_btn_rect)
@@ -2805,14 +2848,14 @@ class ReaderWidget(QWidget):
             elif k in (Qt.Key.Key_Right, Qt.Key.Key_D) and typ not in ("text","path"):
                 wz.adjust(1)
             elif k in (Qt.Key.Key_Up, Qt.Key.Key_W):
-                wz.idx = max(0, wz.idx - 1); self.update()
+                wz._nav(-1); self.update()
             elif k in (Qt.Key.Key_Down, Qt.Key.Key_S):
-                wz.idx = min(len(wz.steps) - 1, wz.idx + 1); self.update()
+                wz._nav(1); self.update()
             elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 if typ in ("text", "path"):
                     wz.start_text_edit()
                 else:
-                    wz.idx = min(len(wz.steps) - 1, wz.idx + 1); self.update()
+                    wz._nav(1); self.update()
             elif ctrl and k == Qt.Key.Key_V:
                 # Paste into text field — enter edit mode if needed then paste
                 from PyQt6.QtWidgets import QApplication as _QApp
@@ -3228,7 +3271,7 @@ class ReaderWidget(QWidget):
         if not delta: return
         if self._wizard and not self._wizard.done:
             wz = self._wizard
-            wz.idx = max(0, min(len(wz.steps) - 1, wz.idx + (-1 if delta > 0 else 1)))
+            wz._nav(-1 if delta > 0 else 1)
             self.update()
         elif self._ai_panel_text or self._ai_panel_fetching:
             self._ai_panel_scroll = max(0, self._ai_panel_scroll - (delta // 3))
@@ -3353,7 +3396,7 @@ class ReaderWidget(QWidget):
                 ("ui_font_offset",    "Font Size",     "int",    -6, 10, 1,   None),
                 ("ui_border_width",   "Border Width",  "int",     1, 10, 1,   None),
                 ("midpoint",          "Midpoint",      "float", 0.1, 0.9, 0.02, None),
-                ("highlight_height",  "HL Height",     "int",     4, 60, 2,   None),
+                ("highlight_height",  "HL Height",     "int",     4, 100, 2,   None),
                 ("highlight_alpha",   "HL Alpha",      "int",     0, 255, 5,  None),
                 ("zoom_mode",         "Zoom Mode",     "choice",  0, 0, 1,    ["fit-width","fit-page","50%","75%","100%"]),
                 ("page_gap",          "Page Gap",      "int",     0, 100, 5,  None),
@@ -4042,7 +4085,7 @@ class ReaderWidget(QWidget):
     def _open_wizard(self, kind: str):
         """Open a wizard overlay. Suppresses status changes during book wizard."""
         self._wizard = WizardOverlay(kind, self)
-        if kind == "book" and self.document:
+        if kind in ("book", "combined") and self.document:
             # Jump to middle-page preview, suppress status promotion
             self._wizard_pre_line   = self.current_line
             self._wizard_active     = True
@@ -4050,13 +4093,15 @@ class ReaderWidget(QWidget):
         self.update()
 
     def _open_settings_wizard(self):
-        """Smart settings opener: book wizard if reading with a doc, app wizard if in library or no doc."""
+        """Smart settings opener: combined wizard if a doc is open, app-only otherwise."""
         mw = self.window()
         library_visible = hasattr(mw, 'library') and mw.library.isVisible()
-        if library_visible or not self.document:
-            self._open_wizard("app")
+        if library_visible:
+            mw.library.hide()
+        if self.document:
+            self._open_wizard("combined")
         else:
-            self._open_wizard("book")
+            self._open_wizard("app")
 
     def _close_wizard(self):
         """Close wizard, restore line, mark app wizard done."""
