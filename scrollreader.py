@@ -37,7 +37,7 @@ Remove  (all prompt y/n, accept optional ;;reason;;)
 Export  (writes Markdown)
   e                     export all annotations
   el[spec]  ep[spec]    export by line / page range
-  eb[spec]  en[spec]  eh[spec]   export specific type
+  xb[spec]  en[spec]  xh[spec]   export specific type
 
 Panels (Esc to close, click item to navigate)
   sn  showbookmarks  sb  showhighlights  sh
@@ -471,9 +471,9 @@ def parse_shortcut(text: str) -> Optional[dict]:
     for pat, cmd in [
         (r"(el|exportline)(" + RANGE_CHARS + r")",      "export_line"),
         (r"(ep|exportpage)(" + RANGE_CHARS + r")",      "export_page"),
-        (r"(eb|exportbookmark)(" + RANGE_CHARS + r")",  "export_bookmark"),
+        (r"(xb|exportbookmark)(" + RANGE_CHARS + r")",  "export_bookmark"),
         (r"(en|exportnote)(" + RANGE_CHARS + r")",      "export_note"),
-        (r"(eh|exporthighlight)(" + RANGE_CHARS + r")", "export_highlight"),
+        (r"(xh|exporthighlight)(" + RANGE_CHARS + r")", "export_highlight"),
     ]:
         m = re.fullmatch(pat, b)
         if m:
@@ -2379,14 +2379,25 @@ class ReaderWidget(QWidget):
             ("?",   "This help panel"),
         ]),
         ("KEYS — CTRL SHORTCUTS", None, [
-            ("Ctrl+K / Ctrl+L",   "Cycle colour swatch backward / forward"),
+            ("Ctrl+Space / Ctrl+Enter", "Open command bar"),
+            ("", ""),
+            ("Ctrl+T / Ctrl+Y",   "Top bar height ±2px"),
+            ("Ctrl+B / Ctrl+N",   "Bottom bar height ±2px"),
+            ("Ctrl+G / Ctrl+H",   "Margin panel width ±5px"),
+            ("Ctrl+U / Ctrl+I",   "Reading midpoint ±0.02"),
+            ("Ctrl+, / Ctrl+.",   "Page gap ±5px"),
+            ("", ""),
+            ("Ctrl+E / Ctrl+R",   "Cycle font backward / forward"),
+            ("Ctrl+D / Ctrl+F",   "UI font size ±1"),
+            ("Ctrl+J / Ctrl+K",   "Border width ±1px"),
+            ("", ""),
+            ("Ctrl+M",            "Cycle colour swatch"),
             ("Ctrl+O / Ctrl+P",   "Cycle indicator colour through HSV wheel"),
             ("Ctrl+[ / Ctrl+]",   "Highlight band height ±2px"),
-            ("Ctrl+= / Ctrl+-",   "UI border width ±1px"),
-            ("Ctrl+; / Ctrl+'",   "UI font size ±1"),
-            ("Ctrl+, / Ctrl+.",   "Cycle font backward / forward"),
-            ("Ctrl+E / Ctrl+R",   "Help panel column offset ±20px"),
-            ("Ctrl+F",            "Flip library sizing mode"),
+            ("Ctrl+; / Ctrl+'",   "Highlight colour through HSV wheel"),
+            ("Ctrl+L",            "Highlight alpha +10"),
+            ("", ""),
+            ("Ctrl+/",            "This help panel"),
         ]),
         ("NAVIGATION COMMANDS", None, [
             ("gl<N>  /  gotoline<N>",    "Jump to line N"),
@@ -2401,7 +2412,7 @@ class ReaderWidget(QWidget):
             ("sp <term>",   "Search previous"),
             ("sf <term>",   "Search first in document"),
             ("sl <term>",   "Search last in document"),
-            ("cc",          "Repeat last command (great for stepping through matches)"),
+            ("!!",          "Repeat last command (great for stepping through matches)"),
             ("",            ""),
             ("", "Use ;;phrase;; for multi-word search:  sn ;;eternal return;;"),
             ("", "Results show [wrapped] when the search loops around the document."),
@@ -2437,16 +2448,29 @@ class ReaderWidget(QWidget):
             ("removeall",   "Remove ALL annotations for this book"),
             ("removeall+",  "Wipe ALL stored data for this book"),
         ]),
+        ("AI COMMANDS", None, [
+            ("", "AI commands use the configured translate_provider and translate_api_key."),
+            ("", ""),
+            ("eb[l|p][N]",  "Extrapolate Bookmarks — select bookmarks, find themes/connections"),
+            ("eh[l|p][N]",  "Extrapolate Highlights — select highlights, find themes/connections"),
+            ("cc[N]",       "Cultural Context — explain passage around current line (N lines each dir)"),
+            ("ccb[N]",      "Cultural Context: Bookmarks — select bookmarks for cultural analysis"),
+            ("cch[N]",      "Cultural Context: Highlights — select highlights for cultural analysis"),
+            ("",            ""),
+            ("", "Append 0 to reuse last selection with a new command:  cc0  ebl0  ehp0"),
+            ("", "In chip selection: ↑↓ scroll, Space toggle, Enter finish, Esc cancel"),
+            ("", "Result panel: scroll with wheel, Esc to dismiss"),
+        ]),
         ("EXPORT COMMANDS", None, [
             ("", "Two modes:  timestamped (new file per export)  or  running (appends to one file)"),
             ("", "Set with:  set export_mode timestamped  or  set export_mode running"),
             ("", ""),
-            ("e",           "Export all annotations"),
-            ("el[range]",   "Export by line range"),
-            ("ep[range]",   "Export by page range"),
-            ("eb[range]",   "Export bookmarks only"),
-            ("en[range]",   "Export notes only"),
-            ("eh[range]",   "Export highlights only"),
+            ("e",            "Export all annotations"),
+            ("el[range]",    "Export by line range"),
+            ("ep[range]",    "Export by page range"),
+            ("xb[range]",    "Export bookmarks only"),
+            ("en[range]",    "Export notes only"),
+            ("xh[range]",    "Export highlights only"),
         ]),
         ("LIBRARY", None, [
             ("lib",                         "Open library browser"),
@@ -3992,7 +4016,7 @@ class ReaderWidget(QWidget):
         if cmd == "help":
             return ("nav: gl# gp# lb[#] lf[#] pb[#] pf[#]  |  "
                     "annotate: nl bl bp hl hp  |  remove: rl rp rb rn rh removeall removeall+  |  "
-                    "export: e el ep eb en eh  |  panels: sn sb sh  |  "
+                    "export: e el ep xb en xh  |  panels: sn sb sh  |  "
                     "zoom  bookinfo  setmeta  bookset  set  q  — all ranges: N  N-M  fwd;back")
         # ── AI commands ────────────────────────────────────────────────────
         ai_m = re.match(r'^(eb|eh|ccb|cch|cc)(l|p)?(\d+)?$', cmd)
