@@ -1629,6 +1629,7 @@ class ReaderWidget(QWidget):
         self._ai_anim_timer = QTimer(self)
         self._ai_anim_timer.timeout.connect(self._ai_anim_tick)
         self._ai_anim_timer.start(130)
+        self._bar_anim_frame: int = 0
     def eventFilter(self, obj, event):
         from PyQt6.QtCore import QEvent
         if obj is self.cmd and event.type() == QEvent.Type.KeyPress:
@@ -2077,6 +2078,9 @@ class ReaderWidget(QWidget):
         ind_col.setAlpha(int(self._cfg("highlight_alpha") or 35))
         painter.fillRect(QRect(px, ind_y-2, self.document.max_width, lh), ind_col)
 
+        # ── Progress bar (before margin so indicators paint on top) ──────────
+        self._paint_vu_meter(painter)
+
         # ── Margins ────────────────────────────────────────────────────────
         self._paint_margin(painter, scroll, voff, vp, dlines, total, lh, ind_y)
 
@@ -2100,7 +2104,6 @@ class ReaderWidget(QWidget):
         self._paint_frame(painter)
         self._paint_top_bar(painter)
         self._paint_bottom_bar(painter)
-        self._paint_vu_meter(painter)
 
         # ── Overlays ──────────────────────────────────────────────────────
         if self.panel and self.panel.get("kind") == "help":
@@ -3612,28 +3615,78 @@ class ReaderWidget(QWidget):
             self._paint_audio_vu(painter)
 
     def _paint_full_bar(self, painter: QPainter, render_frac: float, inv_frac: float):
-        """Full-margin progress bar: fills on render, drains on invert preload."""
-        mr    = self._margin_rect()
+        """Full-margin progress bar with animated labels. Normal fills bottom→up,
+        invert fills top→down. Each bar has rotated marquee text while active."""
+        mr      = self._margin_rect()
         track_x = mr.left() + 2
         track_w = mr.width() - 4
         track_y = mr.top()
         track_h = mr.height()
+        ind     = QColor(self._cfg("indicator_color") or "#ffb000")
+        frame   = self._bar_anim_frame
 
-        ind = QColor(self._cfg("indicator_color") or "#ffb000")
+        # Detect document type for label
+        fp = self.document.filepath if self.document else ""
+        ext = os.path.splitext(fp)[1].lower()
+        doc_type = {".epub":"EBOOK",".mobi":"EBOOK",".cbz":"EBOOK",".fb2":"EBOOK"}.get(ext, "PDF")
 
-        # Render pass: fill bottom→top
+        # Marquee: 8-frame cycle of >> marching across
+        MARQUEE = [">      ", " >     ", "  >    ", "   >   ",
+                   "    >  ", "     > ", "      >", ">>>>>>>"]
+        mq = MARQUEE[frame % 8]
+
+        # ── Normal render bar (fills bottom → top) ────────────────────────
         fill_h = int(track_h * render_frac)
         if fill_h > 0:
-            c = QColor(ind); c.setAlpha(80)
-            painter.fillRect(QRect(track_x, track_y + track_h - fill_h,
-                                   track_w, fill_h), c)
+            fill_y = track_y + track_h - fill_h
+            c = QColor(ind); c.setAlpha(90)
+            painter.fillRect(QRect(track_x, fill_y, track_w, fill_h), c)
 
-        # Invert pass: drain from top — remove top portion proportional to inv progress
-        if inv_frac > 0:
-            drain_h = int(track_h * inv_frac)
-            # Clear the top drain_h pixels of the filled area
-            painter.fillRect(QRect(track_x, track_y + track_h - fill_h,
-                                   track_w, min(drain_h, fill_h)), UI_BG)
+            # Rotated label inside the filled portion: reads bottom-to-top (head tilted left)
+            # Only draw if bar is tall enough to show text
+            if fill_h > 20:
+                label = f"{mq} LOADING {doc_type}"
+                font  = _ui_font(8, bold=True)
+                fm    = QFontMetrics(font)
+                tw    = fm.horizontalAdvance(label)
+                # Text fits within the filled height
+                text_x = track_x + track_w // 2
+                text_y = min(track_y + track_h - 4,
+                             fill_y + fill_h - 4)  # bottom of fill
+                text_y = max(fill_y + tw + 2, text_y)
+
+                painter.save()
+                painter.setFont(font)
+                # Inverted colors so text is readable against the fill
+                painter.setPen(QColor(0, 0, 0) if ind.lightness() > 100 else AMBER_BRIGHT)
+                painter.translate(text_x, text_y)
+                painter.rotate(-90)   # bottom-to-top: head tilted left
+                painter.drawText(0, 0, label)
+                painter.restore()
+
+        # ── Invert bar (fills top → down) ─────────────────────────────────
+        inv_fill_h = int(track_h * inv_frac)
+        if inv_fill_h > 0:
+            c2 = QColor(ind); c2.setAlpha(50)
+            painter.fillRect(QRect(track_x, track_y, track_w, inv_fill_h), c2)
+
+            if inv_fill_h > 20:
+                label2 = f"LOADING INVERT {doc_type} {mq}"
+                font   = _ui_font(8, bold=True)
+                fm     = QFontMetrics(font)
+                tw     = fm.horizontalAdvance(label2)
+                text_x = track_x + track_w // 2
+                text_y = max(track_y + 4,
+                             track_y + inv_fill_h - tw - 2)
+                text_y = min(track_y + inv_fill_h - 4, text_y + tw)
+
+                painter.save()
+                painter.setFont(font)
+                painter.setPen(QColor(0, 0, 0) if ind.lightness() > 100 else AMBER_BRIGHT)
+                painter.translate(text_x, track_y + 4)
+                painter.rotate(90)    # top-to-bottom: head tilted right
+                painter.drawText(0, 0, label2)
+                painter.restore()
 
     def _paint_audio_vu(self, painter: QPainter):
         """Mini audio VU bar (used alongside full-bar mode)."""
@@ -3839,6 +3892,9 @@ class ReaderWidget(QWidget):
     def _ai_anim_tick(self):
         if self._ai_panel_fetching:
             self._ai_panel_anim_frame = (self._ai_panel_anim_frame + 1) % 4
+            self.update()
+        if self._render_thread is not None:
+            self._bar_anim_frame = (self._bar_anim_frame + 1) % 8
             self.update()
 
     def _launch_ai_command(self, cmd: AICommand, context_n: int, reuse_last: bool = False):
@@ -4175,17 +4231,24 @@ class ReaderWidget(QWidget):
     def _open_wizard(self, kind: str):
         """Open a wizard overlay. Suppresses status changes during book wizard."""
         self._wizard = WizardOverlay(kind, self)
-        if kind in ("book", "combined") and self.document:
-            # Jump to middle-page preview, suppress status promotion
+        if kind == "book" and self.document:
+            # Jump to middle-page preview for first-open book wizard only
             self._wizard_pre_line   = self.current_line
             self._wizard_active     = True
             self.current_line       = self._middle_line()
+            # Ensure pages around the preview position are rendered
+            mid_page = self.document.lines[self.current_line].page_num if self.document.lines else 0
+            eager    = int(self.config.get("eager_pages") or 2)
+            self.document.render_range(mid_page - eager, mid_page + eager,
+                                       inverted=bool(self.config.get("preload_inverted") if self.config.get("preload_inverted") is not None else True))
+        # combined and app: stay at current position, no preview jump
         self.update()
 
     def _open_settings_wizard(self):
         """Smart settings opener: combined wizard if a doc is open, app-only otherwise."""
         mw = self.window()
         library_visible = hasattr(mw, 'library') and mw.library.isVisible()
+        self._wizard_from_library = library_visible
         if library_visible:
             mw.library.hide()
         if self.document:
@@ -4208,6 +4271,12 @@ class ReaderWidget(QWidget):
                 if e.get("line", 0) == 0:
                     e["status"] = "unread"
                     self.history._save()
+        # Reopen library if settings were opened from there
+        if getattr(self, '_wizard_from_library', False):
+            self._wizard_from_library = False
+            mw = self.window()
+            if hasattr(mw, 'show_library'):
+                QTimer.singleShot(50, mw.show_library)
         self.update()
 
     def _clear_status(self):
@@ -5813,9 +5882,9 @@ class LibraryWidget(QWidget):
         # Cancel search if leaving SEARCH tab
         if old_tab == "SEARCH" and self.tab != "SEARCH":
             self._cancel_lib_search()
-        # Auto-activate search input when entering SEARCH tab
+        # Always start in nav mode when entering SEARCH tab — user presses Enter/Ctrl+Space to type
         if self.tab == "SEARCH":
-            self._lib_search_input_active = True
+            self._lib_search_input_active = False
         self._refresh_books()
         self.update()
 
@@ -6051,11 +6120,12 @@ class LibraryWidget(QWidget):
     # ------------------------------------------------- command mode
 
     def _open_app_wizard(self):
-        """Hide library and open the app settings wizard on the reader."""
-        self.tab = "UNREAD"   # reset so re-opening library doesn't loop
+        """Hide library and open the app settings wizard on the reader, restoring library on close."""
+        self.tab = "UNREAD"
         self.hide()
         mw = self.parent()
         mw.reader.setFocus()
+        mw.reader._wizard_from_library = True
         mw.reader._open_wizard("app")
 
     def _enter_command_mode(self):
