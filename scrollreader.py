@@ -1190,7 +1190,6 @@ class WizardOverlay:
         ("bottom_bar_h",      "Bottom bar height",     "int",     None,          16,  60,   2),
         ("panel_w",           "Panel width",           "int",     None,          80, 400,   5),
         ("ui_border_width",   "Border thickness",      "int",     None,           1,  10,   1),
-        ("indicator_color",   "Indicator/HL color",    "color",   None,           0,   0,   5),
         ("margin_side",       "Margin side",           "choice",  ["right","left"],0,  0,   1),
         ("library_dir",       "Library folder",        "path",    None,           0,   0,   0),
         ("translate_provider","Translate provider",    "choice",
@@ -1206,6 +1205,7 @@ class WizardOverlay:
         ("pdf_invert",        "Invert PDF colors",     "bool",    None,           0,   1,   1),
         ("zoom_mode",         "Zoom mode",             "choice",
             ["fit-width","fit-page","50%","75%","100%","110%","120%"], 0, 0, 1),
+        ("indicator_color",   "Line indicator color",  "color",   None,           0,   0,   5),
         ("highlight_height",  "Highlight line height", "int",     None,           4,  60,   2),
         ("highlight_alpha",   "Highlight opacity",     "int",     None,           0, 255,  10),
         ("margin_side",       "Margin side",           "choice",  ["right","left"],0,  0,   1),
@@ -2012,10 +2012,9 @@ class ReaderWidget(QWidget):
         font   = _ui_font(9)
         ty     = TOP_BAR_H - 8
 
-        # Close button — square flush to top-right, inset from margin if margin is right
+        # Close button — square flush to true top-right corner of window
         btn_sz = TOP_BAR_H
-        side   = self._margin_side()
-        btn_x  = (w - PANEL_W - btn_sz) if side == "right" else (w - btn_sz)
+        btn_x  = w - btn_sz
         self._close_btn_rect = QRect(btn_x, 0, btn_sz, btn_sz)
         bw = self._bw()
         painter.setPen(_mk_pen(AMBER_DARK, bw))
@@ -2675,7 +2674,7 @@ class ReaderWidget(QWidget):
             ("ms  /  swapmargin",            "Swap annotation margin side (left ↔ right)"),
             ("set theme_primary #ffbb33",    "Set primary UI colour"),
             ("set theme_bg #000000",         "Set background colour"),
-            ("set indicator_color #ffb000",  "Set main line indicator colour"),
+            ("set indicator_color #ffb000",  "Main line indicator colour (also settable per book via pdfsettings)"),
             ("set preload_inverted true",     "Pre-render inverted page cache (default true)"),
         ]),
         ("GLOBAL CONFIG", None, [
@@ -2686,7 +2685,19 @@ class ReaderWidget(QWidget):
             ("set midpoint 0.42",            "Indicator lock position (0.0–1.0)"),
             ("set page_gap 30",              "Pixel gap between PDF pages"),
             ("set export_dir ~/exports",     "Default export directory"),
+            ("set export_mode timestamped",  "Export mode: timestamped or running"),
             ("set help_col_offset 0",        "Help panel column offset (adjust with Ctrl+E/R)"),
+            ("set ui_language fr",           "UI/preferred language (auto-fills translate language)"),
+            ("set background_color #000000", "Main background colour"),
+            ("set statusbar_color #000000",  "Status bar background colour"),
+            ("set statusbar_text_color #ffbb33", "Status bar text colour"),
+            ("set preload_inverted true",    "Pre-render inverted page cache"),
+        ]),
+        ("LIBRARY CONFIG", None, [
+            ("set library_dir <path>",       "Root folder scanned for PDFs and ebooks"),
+            ("set library_recursive true",   "Scan subdirectories too"),
+            ("set read_tab_sizing flat",     "Read tab sizing: flat or lines"),
+            ("set library_swatch [\"#hex\",…]","JSON list of hex codes for book swatch colours"),
         ]),
         ("FILES", None, [
             ("~/.scrollreader/config.json",  "Global configuration"),
@@ -3320,6 +3331,7 @@ class ReaderWidget(QWidget):
         """Open the search panel (gamepad R4 or keyboard)."""
         if not self.document: return
         self._search_panel_active = True
+        self._search_input_active = False   # always start in nav mode, not typing mode
         self._search_results      = getattr(self, '_search_results', [])
         self._search_pre_line     = self.current_line
         self._search_cursor       = 0
@@ -4886,7 +4898,12 @@ class LibraryWidget(QWidget):
         content_h = h - content_y - TAG_BAR_H - LIB_STATUS_H - (26 if self._cmd_mode else 0)
 
         if self.tab == "SETTINGS":
-            self._paint_settings(painter, 0, content_y, w, content_h)
+            # Redirect to the app settings wizard — show a brief message while transitioning
+            painter.setFont(_ui_font(10))
+            painter.setPen(AMBER_DIM)
+            painter.drawText(QRect(0, content_y, w, content_h),
+                             Qt.AlignmentFlag.AlignCenter, "Opening app settings…")
+            QTimer.singleShot(80, self._open_app_wizard)
         elif self.tab == "SEARCH":
             self._paint_library_search(painter, 0, content_y, w, content_h)
         elif self.tab == "REFERENCE":
@@ -5897,6 +5914,14 @@ class LibraryWidget(QWidget):
                 return
 
     # ------------------------------------------------- command mode
+
+    def _open_app_wizard(self):
+        """Hide library and open the app settings wizard on the reader."""
+        self.tab = "UNREAD"   # reset so re-opening library doesn't loop
+        self.hide()
+        mw = self.parent()
+        mw.reader.setFocus()
+        mw.reader._open_wizard("app")
 
     def _enter_command_mode(self):
         self._cmd_mode = True
