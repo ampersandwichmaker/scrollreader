@@ -339,6 +339,8 @@ DEFAULT_CONFIG = {
     "eager_pages":           2,             # pages rendered synchronously each side of current
     "progress_bar_style":    "mini",        # "mini" | "full"
     "wizard_completed":      False,         # True after first-run wizard is done
+    "max_cached_pages":      300,           # sliding render window size (0 = unlimited)
+    "max_cache_mb":          0,             # RAM cap in MB (0 = use page count only)
     "translate_provider":    "anthropic",   # anthropic | google | google_official | openai | ollama
     "translate_api_key":     "",            # API key for anthropic/google_official/openai
     "translate_target_lang": "",            # e.g. "es", "fr", "de" — empty = prompt to set
@@ -871,6 +873,24 @@ class PDFDocument:
         pm = self.page_pixmaps[pn]
         return pm if pm is not None else self.placeholder(pn)
 
+    def evict_outside(self, lo: int, hi: int):
+        """Release pixmaps for pages outside [lo, hi]. Must be called from main thread."""
+        for pn in range(len(self.doc)):
+            if pn < lo or pn > hi:
+                self.page_pixmaps[pn]     = None
+                self.page_pixmaps_inv[pn] = None
+
+    def cache_byte_estimate(self) -> int:
+        """Rough byte count of all currently loaded pixmaps."""
+        total = 0
+        for pm in self.page_pixmaps:
+            if pm is not None:
+                total += pm.width() * pm.height() * 3
+        for pm in self.page_pixmaps_inv:
+            if pm is not None:
+                total += pm.width() * pm.height() * 3
+        return total
+
     @property
     def page_count(self):
         return len(self.doc)
@@ -881,11 +901,13 @@ class RenderThread(QThread):
     page_ready_inv = pyqtSignal(int, QPixmap)
 
     def __init__(self, document: PDFDocument, start_page: int,
-                 preload_inv: bool = True):
+                 preload_inv: bool = True, lo: int = 0, hi: int = -1):
         super().__init__()
         self.document    = document
         self.start_page  = start_page
         self.preload_inv = preload_inv
+        self.lo          = lo
+        self.hi          = hi if hi >= 0 else document.page_count - 1
         self._cancel     = False
 
     def cancel(self):
@@ -893,7 +915,9 @@ class RenderThread(QThread):
 
     def run(self):
         n     = self.document.page_count
-        order = _render_order(self.start_page, n)
+        lo, hi = self.lo, self.hi
+        order = [pn for pn in _render_order(self.start_page, n)
+                 if lo <= pn <= hi]
         # Pass 1: normal render
         for pn in order:
             if self._cancel: return
@@ -1199,6 +1223,8 @@ class WizardOverlay:
         ("ai_model_fast",     "AI model: fast (translation)",  "text", None,      0,   0,   0),
         ("ai_model_default",  "AI model: default (extrapolate)","text",None,      0,   0,   0),
         ("ai_model_powerful", "AI model: powerful (cultural context)","text",None,0,   0,   0),
+        ("max_cached_pages",  "Max cached pages (0=unlimited)", "int", None,      0, 2000, 50),
+        ("max_cache_mb",      "Max cache RAM MB (0=use page limit)", "int", None, 0, 32768, 256),
     ]
 
     BOOK_STEPS = [
@@ -1549,6 +1575,8 @@ class ReaderWidget(QWidget):
         self._pending: Optional[dict]  = None
         self._panel_rects: list        = []
         self._render_thread: Optional[RenderThread] = None
+        self._cache_lo: int = 0
+        self._cache_hi: int = 0
         self._cmd_history:   list[str] = []
         self._cmd_history_idx: int     = -1
         # New state
@@ -1744,10 +1772,68 @@ class ReaderWidget(QWidget):
         except Exception as ex:
             self.status_text = f"error: {ex}"; self.update()
 
+    def _compute_cache_window(self, center_page: int) -> tuple:
+        """Return (lo, hi) page range to keep in memory."""
+        if not self.document: return (0, 0)
+        n         = self.document.page_count
+        max_pages = int(self.config.get("max_cached_pages") or 300)
+
+        # RAM-based cap: estimate pages that fit within max_cache_mb
+        max_mb = int(self.config.get("max_cache_mb") or 0)
+        if max_mb > 0 and self.document:
+            pw = int(self.document.natural_width  * self.document.zoom)
+            ph = int(self.document.natural_height * self.document.zoom)
+            bytes_per_page = pw * ph * 3 * 2   # normal + inv
+            pages_by_ram   = max(1, (max_mb * 1024 * 1024) // bytes_per_page)
+            if max_pages <= 0:
+                max_pages = pages_by_ram
+            else:
+                max_pages = min(max_pages, pages_by_ram)
+
+        if max_pages <= 0:
+            return (0, n - 1)   # unlimited
+
+        back = max_pages // 4
+        fwd  = max_pages - back
+        lo   = max(0,     center_page - back)
+        hi   = min(n - 1, center_page + fwd)
+        # If clamped at start/end, redistribute the slack
+        if lo == 0:
+            hi = min(n - 1, max_pages - 1)
+        elif hi == n - 1:
+            lo = max(0, n - max_pages)
+        return (lo, hi)
+
+    def _check_cache_window(self):
+        """Called after navigation — shift window and restart render if needed."""
+        if not self.document: return
+        if not self.document.lines: return
+        cur_page  = self.document.lines[self.current_line].page_num
+        max_pages = int(self.config.get("max_cached_pages") or 300)
+        if max_pages <= 0: return   # unlimited, nothing to do
+
+        lo, hi = self._compute_cache_window(cur_page)
+
+        # Only re-render if window shifted by more than 20 pages
+        if abs(lo - self._cache_lo) < 20 and abs(hi - self._cache_hi) < 20:
+            return
+
+        # Evict pages outside new window (main thread — safe)
+        self.document.evict_outside(lo, hi)
+        self._cache_lo = lo
+        self._cache_hi = hi
+
+        # Restart render for any unrendered pages in the new window
+        self._start_render_thread(cur_page)
+
     def _start_render_thread(self, start_page: int):
         self._stop_render_thread()
-        preload = bool(self.config.get("preload_inverted") if self.config.get("preload_inverted") is not None else True)
-        t = RenderThread(self.document, start_page, preload_inv=preload)
+        if not self.document: return
+        preload   = bool(self.config.get("preload_inverted") if self.config.get("preload_inverted") is not None else True)
+        lo, hi    = self._compute_cache_window(start_page)
+        self._cache_lo = lo
+        self._cache_hi = hi
+        t = RenderThread(self.document, start_page, preload_inv=preload, lo=lo, hi=hi)
         t.page_ready.connect(self._on_page_ready)
         t.page_ready_inv.connect(self._on_page_ready_inv)
         t.finished.connect(self._on_render_done)
@@ -3313,6 +3399,7 @@ class ReaderWidget(QWidget):
         self._push_history(self.current_line)
         self.current_line = max(0, min(len(self.document.lines)-1, self.current_line+delta))
         self.history.set_line(self.document.filepath, self.current_line)
+        self._check_cache_window()
         self.update()
 
     def _jump_pages(self, direction):
@@ -3509,13 +3596,16 @@ class ReaderWidget(QWidget):
             py += item_h
 
     def _paint_vu_meter(self, painter: QPainter):
-        """Progress bars — always full (big margin bar) style."""
+        """Progress bars — always full (big margin bar) style, computed over current cache window."""
         render_frac = 0.0
         inv_frac    = 0.0
         rendering   = self._render_thread is not None and self.document is not None
         if rendering:
-            render_frac = sum(1 for p in self.document.page_pixmaps if p is not None) / max(self.document.page_count, 1)
-            inv_frac    = sum(1 for p in self.document.page_pixmaps_inv if p is not None) / max(self.document.page_count, 1)
+            lo  = self._cache_lo
+            hi  = min(self._cache_hi, self.document.page_count - 1)
+            win = max(1, hi - lo + 1)
+            render_frac = sum(1 for p in self.document.page_pixmaps[lo:hi+1]     if p is not None) / win
+            inv_frac    = sum(1 for p in self.document.page_pixmaps_inv[lo:hi+1] if p is not None) / win
             self._paint_full_bar(painter, render_frac, inv_frac)
 
         if getattr(self, '_vu_active', False):
