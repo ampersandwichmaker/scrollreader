@@ -1159,7 +1159,6 @@ class WizardOverlay:
         ("highlight_height",  "Highlight height",      "int",     None,           4,  60,   2),
         ("highlight_alpha",   "Highlight opacity",     "int",     None,           0, 255,  10),
         ("margin_side",       "Margin side",           "choice",  ["right","left"],0,  0,   1),
-        ("progress_bar_style","Progress bar style",    "choice",  ["mini","full"], 0,  0,   1),
         ("library_dir",       "Library folder",        "path",    None,           0,   0,   0),
         ("translate_provider","Translate provider",    "choice",
             ["anthropic","google","google_official","openai","ollama"], 0, 0, 1),
@@ -1243,9 +1242,12 @@ class WizardOverlay:
             self.reader.config.set(key, val)
             # Apply dimension globals immediately
             global TOP_BAR_H, BOTTOM_BAR_H, PANEL_W
-            if key == "top_bar_h":    TOP_BAR_H    = int(val)
+            if key == "top_bar_h":      TOP_BAR_H    = int(val)
             elif key == "bottom_bar_h": BOTTOM_BAR_H = int(val)
-            elif key == "panel_w":    PANEL_W      = int(val)
+            elif key == "panel_w":      PANEL_W      = int(val)
+            elif key == "ui_font_offset":
+                _UI_FONT_OFFSET_ref[0] = int(val)
+                self.reader._update_cmd_style()
             if key == "zoom_mode" and self.reader.document:
                 self.reader.zoom_mode = val
                 self.reader._rerender()
@@ -1261,67 +1263,97 @@ class WizardOverlay:
             self.idx -= 1
 
     def paint(self, painter: QPainter, w: int, h: int):
-        key, label, typ, choices, mn, mx, step = self.current()
-        cur = self.get_val()
-        n   = len(self.steps)
-
-        # Overlay strip: bottom 35% of viewport
-        oh   = int((h - TOP_BAR_H - BOTTOM_BAR_H) * 0.35)
-        oy   = h - BOTTOM_BAR_H - oh
-        font_b = _ui_font(11, bold=True)
+        n      = len(self.steps)
+        ROW_H  = 28
+        PAD    = 12
+        font_b = _ui_font(10, bold=True)
         font   = _ui_font(10)
         font_s = _ui_font(9)
-        fm_b   = QFontMetrics(font_b)
+
+        # Overlay strip: bottom 40% of viewport
+        oh = int((h - TOP_BAR_H - BOTTOM_BAR_H) * 0.40)
+        oy = h - BOTTOM_BAR_H - oh
 
         # Background
-        bg = QColor(UI_BG); bg.setAlpha(240)
+        bg = QColor(UI_BG); bg.setAlpha(245)
         painter.fillRect(QRect(0, oy, w, oh), bg)
         painter.setPen(_mk_pen(AMBER_BRIGHT, 2))
         painter.drawLine(0, oy, w, oy)
 
-        # Progress counter
-        painter.setPen(AMBER_DIM)
-        painter.setFont(font_s)
-        painter.drawText(w - 80, oy + 18, f"{self.idx+1} of {n}")
-
-        # Wizard type label
+        # Header row
         kind_lbl = "APP SETUP" if self.kind == "app" else "BOOK SETUP"
         painter.setPen(AMBER_DARK)
         painter.setFont(font_s)
-        painter.drawText(16, oy + 18, kind_lbl)
+        painter.drawText(PAD, oy + 14, kind_lbl)
+        painter.setPen(AMBER_DIM)
+        painter.drawText(w - 100, oy + 14,
+            "←/→ change   Esc close")
 
-        # Setting label
-        painter.setPen(AMBER)
-        painter.setFont(font_b)
-        painter.drawText(16, oy + 50, label)
+        # Scrollable list area
+        list_y  = oy + 22
+        list_h  = oh - 22 - 4
+        visible = list_h // ROW_H
 
-        # Current value (large, centered)
-        val_str = self._val_display(key, typ, choices, cur)
-        painter.setPen(AMBER_BRIGHT)
-        painter.setFont(_ui_font(14, bold=True))
-        fm14 = QFontMetrics(_ui_font(14, bold=True))
-        vx   = (w - fm14.horizontalAdvance(val_str)) // 2
-        painter.drawText(vx, oy + 90, val_str)
+        # Auto-scroll to keep selected item visible
+        if not hasattr(self, '_scroll_offset'):
+            self._scroll_offset = 0
+        top_vis = self._scroll_offset
+        bot_vis = self._scroll_offset + visible - 1
+        if self.idx < top_vis:
+            self._scroll_offset = self.idx
+        elif self.idx > bot_vis:
+            self._scroll_offset = self.idx - visible + 1
+        self._scroll_offset = max(0, min(self._scroll_offset, max(0, n - visible)))
 
-        # Arrows hint
-        if typ not in ("text", "path"):
-            painter.setPen(AMBER_DIM)
-            painter.setFont(font_s)
-            painter.drawText(16, oy + oh - 28,
-                "←/→ change value   ↑/↓ step through settings   Enter next   Tab skip   Esc close")
-        else:
-            painter.setPen(AMBER_DIM)
-            painter.setFont(font_s)
-            painter.drawText(16, oy + oh - 28,
-                "Enter/Tab to skip (edit via :set command)   Esc close")
+        painter.setClipRect(QRect(0, list_y, w, list_h))
 
-        # Step dots
-        dot_total_w = n * 10 - 2
-        dx = (w - dot_total_w) // 2
-        dy = oy + oh - 12
-        for i in range(n):
-            c = AMBER_BRIGHT if i == self.idx else AMBER_VERY_DIM
-            painter.fillRect(QRect(dx + i*10, dy, 8, 4), c)
+        for i, step in enumerate(self.steps):
+            key, label, typ, choices, mn, mx, step_size = step
+            row_y  = list_y + (i - self._scroll_offset) * ROW_H
+            if row_y + ROW_H < list_y or row_y > list_y + list_h:
+                continue
+
+            selected = (i == self.idx)
+
+            # Row background
+            if selected:
+                painter.fillRect(QRect(0, row_y, w, ROW_H), QColor(AMBER.red(), AMBER.green(), AMBER.blue(), 20))
+
+            # Label
+            painter.setFont(font_b if selected else font)
+            painter.setPen(AMBER if selected else AMBER_DIM)
+            painter.drawText(PAD, row_y + ROW_H - 8, label)
+
+            # Value
+            cur     = self._get_val_for(i)
+            val_str = self._val_display(key, typ, choices, cur)
+            painter.setFont(_ui_font(10, bold=True) if selected else font_s)
+            painter.setPen(AMBER_BRIGHT if selected else AMBER_DARK)
+            val_x = w - QFontMetrics(painter.font()).horizontalAdvance(val_str) - PAD
+            if selected:
+                # Draw arrows around value
+                painter.setPen(AMBER_DIM)
+                painter.drawText(val_x - 18, row_y + ROW_H - 8, "‹")
+                painter.drawText(w - PAD - 6, row_y + ROW_H - 8, "›")
+                painter.setPen(AMBER_BRIGHT)
+            painter.drawText(val_x, row_y + ROW_H - 8, val_str)
+
+            # Divider
+            if not selected:
+                painter.setPen(_mk_pen(QColor(40, 40, 40), 1))
+                painter.drawLine(PAD, row_y + ROW_H - 1, w - PAD, row_y + ROW_H - 1)
+
+        painter.setClipping(False)
+
+    def _get_val_for(self, idx: int):
+        """Get current value for step at index idx."""
+        key = self.steps[idx][0]
+        if self.kind == "book" and self.reader.document:
+            e  = self.reader.history._entry(self.reader.document.filepath)
+            ov = e.get("config_overrides", {})
+            if key in ov: return ov[key]
+            if key == "pdf_invert": return e.get("pdf_invert", False)
+        return self.reader.config.get(key)
 
     def _val_display(self, key, typ, choices, cur) -> str:
         if typ == "swatch":   return str(cur or "amber")
@@ -2535,17 +2567,20 @@ class ReaderWidget(QWidget):
     ]
 
     def _paint_help_panel(self, painter: QPainter):
-        pw = self.width()
+        vp = self._vp()
+        px = vp.left()
+        pw = vp.width()
         py = TOP_BAR_H
         ph = self.height() - TOP_BAR_H
 
-        # Background
-        painter.fillRect(QRect(0, py, pw, ph), QColor(0,0,0,252))
+        # Background — covers only the PDF viewport, not the margin
+        painter.fillRect(QRect(px, py, pw, ph), QColor(0,0,0,252))
 
         # Clip to panel area
-        painter.setClipRect(QRect(0, py, pw, ph - 24))
+        painter.setClipRect(QRect(px, py, pw, ph - 24))
 
-        margin   = 48
+        col_offset = int(self.config.get("help_col_offset") or 0)
+        margin   = px + 48 + col_offset
         col2_x   = 280
         y        = py + 20 - self._panel_scroll
         lh_body  = 19
@@ -2558,7 +2593,7 @@ class ReaderWidget(QWidget):
         for section, _, rows in self.HELP_SECTIONS:
             # Section header
             y += 8
-            painter.fillRect(QRect(0, y - 2, pw, lh_head), QColor(16,16,16))
+            painter.fillRect(QRect(px, y - 2, pw, lh_head), QColor(16,16,16))
             painter.setPen(AMBER_BRIGHT)
             painter.setFont(sans)
             painter.drawText(margin, y + lh_head - 8, section)
@@ -2569,19 +2604,15 @@ class ReaderWidget(QWidget):
                     y += 8; continue
 
                 if key == "":
-                    # Continuation / descriptive line
                     painter.setPen(AMBER_DIM)
                     painter.setFont(mono)
-                    # Word-wrap simple approach: draw in full available width
                     painter.drawText(margin, y + lh_body - 4, val)
                     y += lh_body
                 else:
-                    # Key column (left, amber)
                     painter.setPen(AMBER)
                     painter.setFont(mono_b)
                     painter.drawText(margin, y + lh_body - 4, key)
                     if val:
-                        # Value column (right, grey)
                         painter.setPen(AMBER_DIM)
                         painter.setFont(mono)
                         painter.drawText(col2_x + margin, y + lh_body - 4, val)
@@ -2592,9 +2623,9 @@ class ReaderWidget(QWidget):
         painter.setClipping(False)
 
         # Footer bar
-        painter.fillRect(QRect(0, self.height()-24, pw, 24), UI_BG)
+        painter.fillRect(QRect(px, self.height()-24, pw, 24), UI_BG)
         painter.setPen(AMBER_VERY_DIM)
-        painter.drawLine(0, self.height()-24, pw, self.height()-24)
+        painter.drawLine(px, self.height()-24, px + pw, self.height()-24)
         painter.setPen(AMBER_DARK)
         painter.setFont(_ui_font(9))
         painter.drawText(margin, self.height()-8, "↑ ↓  PgUp  PgDn  scroll  —  Esc to close")
@@ -2607,24 +2638,19 @@ class ReaderWidget(QWidget):
 
         # ── Wizard overlay — eats all input ──────────────────────────────
         if self._wizard and not self._wizard.done:
-            wz = self._wizard
+            wz  = self._wizard
             typ = wz.current()[2]
-            if k == Qt.Key.Key_Escape or k == Qt.Key.Key_Tab:
+            if k in (Qt.Key.Key_Escape, Qt.Key.Key_Tab):
                 self._close_wizard()
-            elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                wz.advance()
-                if wz.done: self._close_wizard()
-                else: self.update()
             elif k in (Qt.Key.Key_Left, Qt.Key.Key_A) and typ not in ("text","path"):
                 wz.adjust(-1)
             elif k in (Qt.Key.Key_Right, Qt.Key.Key_D) and typ not in ("text","path"):
                 wz.adjust(1)
             elif k in (Qt.Key.Key_Up, Qt.Key.Key_W):
-                wz.back(); self.update()
-            elif k in (Qt.Key.Key_Down, Qt.Key.Key_S):
-                wz.advance()
-                if wz.done: self._close_wizard()
-                else: self.update()
+                wz.idx = max(0, wz.idx - 1); self.update()
+            elif k in (Qt.Key.Key_Down, Qt.Key.Key_S,
+                       Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                wz.idx = min(len(wz.steps) - 1, wz.idx + 1); self.update()
             return   # eat everything else
 
         # ── AI chip selection mode ────────────────────────────────────────
@@ -3028,7 +3054,11 @@ class ReaderWidget(QWidget):
     def wheelEvent(self, ev: QWheelEvent):
         delta = ev.angleDelta().y()
         if not delta: return
-        if self._ai_panel_text or self._ai_panel_fetching:
+        if self._wizard and not self._wizard.done:
+            wz = self._wizard
+            wz.idx = max(0, min(len(wz.steps) - 1, wz.idx + (-1 if delta > 0 else 1)))
+            self.update()
+        elif self._ai_panel_text or self._ai_panel_fetching:
             self._ai_panel_scroll = max(0, self._ai_panel_scroll - (delta // 3))
             self.update()
         elif self._ai_chip_mode:
@@ -3256,56 +3286,17 @@ class ReaderWidget(QWidget):
             py += item_h
 
     def _paint_vu_meter(self, painter: QPainter):
-        """Progress bars — mini (audio meter) or full (big margin bar)."""
-        style = self.config.get("progress_bar_style") or "mini"
-
-        # Gather render progress
+        """Progress bars — always full (big margin bar) style."""
         render_frac = 0.0
         inv_frac    = 0.0
         rendering   = self._render_thread is not None and self.document is not None
         if rendering:
             render_frac = sum(1 for p in self.document.page_pixmaps if p is not None) / max(self.document.page_count, 1)
             inv_frac    = sum(1 for p in self.document.page_pixmaps_inv if p is not None) / max(self.document.page_count, 1)
-
-        if style == "full" and rendering:
             self._paint_full_bar(painter, render_frac, inv_frac)
-            # Still draw audio VU in mini style on top if recording
-            if getattr(self, '_vu_active', False):
-                self._paint_audio_vu(painter)
-            return
-
-        # Mini style — audio meter bars
-        tasks = []
-        if rendering:
-            tasks.append(("render", render_frac, AMBER))
-            if inv_frac < 1.0:
-                tasks.append(("invert", inv_frac, AMBER_DIM))
-        if getattr(self, '_vu_active', False):
-            level = _audio_recorder.vu_level
-            col   = QColor("#ff4444") if level > 0.8 else QColor("#ffbb33") if level > 0.4 else QColor("#44ff88")
-            tasks.append(("audio", level, col))
-
-        if not tasks: return
-
-        w, h    = self.width(), self.height()
-        bar_w   = 6
-        bar_gap = 3
-        bar_h   = BOTTOM_BAR_H - 6
-        total_w = len(tasks) * (bar_w + bar_gap) - bar_gap
-        start_x = w - total_w - 8
-        base_y  = h - BOTTOM_BAR_H + 3
-
-        for i, (name, frac, color) in enumerate(tasks):
-            bx = start_x + i * (bar_w + bar_gap)
-            painter.fillRect(QRect(bx, base_y, bar_w, bar_h), AMBER_VERY_DIM)
-            fill_h = max(2, int(bar_h * frac))
-            fy     = base_y + bar_h - fill_h
-            painter.fillRect(QRect(bx, fy, bar_w, fill_h), QColor(color))
 
         if getattr(self, '_vu_active', False):
-            painter.setPen(QColor("#ff4444"))
-            painter.setFont(_ui_font(8))
-            painter.drawText(start_x - 30, h - BOTTOM_BAR_H + bar_h - 1, "REC")
+            self._paint_audio_vu(painter)
 
     def _paint_full_bar(self, painter: QPainter, render_frac: float, inv_frac: float):
         """Full-margin progress bar: fills on render, drains on invert preload."""
@@ -3720,7 +3711,7 @@ class ReaderWidget(QWidget):
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
 
     def _paint_ai_result_panel(self, painter: QPainter):
-        """Paint the AI result panel — bottom 25% of PDF viewport, doesn't cover margin."""
+        """Paint the AI result panel — bottom 25% of PDF viewport only."""
         ANIM   = [' >>>', '> >>', '>> >', '>>> ']
         vp     = self._vp()
         ph     = vp.height() // 4
