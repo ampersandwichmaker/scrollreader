@@ -342,8 +342,19 @@ DEFAULT_CONFIG = {
     "translate_provider":    "anthropic",   # anthropic | google | google_official | openai | ollama
     "translate_api_key":     "",            # API key for anthropic/google_official/openai
     "translate_target_lang": "",            # e.g. "es", "fr", "de" — empty = prompt to set
+    "ui_language":           "",            # preferred reading/UI language — auto-populates translate_target_lang
     "translate_ollama_host": "http://localhost:11434",
     "translate_ollama_model":"qwen3:8b",
+    # AI model tiers — fast=translation, default=extrapolate, powerful=cultural context
+    "ai_model_fast":             "claude-haiku-4-5-20251001",
+    "ai_model_default":          "claude-sonnet-4-6",
+    "ai_model_powerful":         "claude-opus-4-6",
+    "ai_model_openai_fast":      "gpt-4o-mini",
+    "ai_model_openai_default":   "gpt-4o",
+    "ai_model_openai_powerful":  "gpt-4o",
+    "ai_model_ollama_fast":      "qwen3:8b",
+    "ai_model_ollama_default":   "qwen3:8b",
+    "ai_model_ollama_powerful":  "qwen3:8b",
 }
 
 ZOOM_MODES   = ["fit-width", "fit-page", "50%", "75%", "100%", "110%", "120%"]
@@ -938,16 +949,23 @@ class TranslateThread(QThread):
             self.result_ready.emit(f"[error: {ex}]")
 
     def _translate(self) -> str:
-        lang = self.target_lang
+        lang   = self.target_lang
         system = f"Translate to {lang}. Reply with only the translation, no explanation."
-        return _call_provider(system, self.text.strip(), self.config)
+        provider = (self.config.get("translate_provider") or "anthropic").lower()
+        if provider == "ollama":
+            model = self.config.get("ai_model_ollama_fast") or self.config.get("translate_ollama_model") or "qwen3:8b"
+        elif provider == "openai":
+            model = self.config.get("ai_model_openai_fast") or "gpt-4o-mini"
+        else:
+            model = self.config.get("ai_model_fast") or ""
+        return _call_provider(system, self.text.strip(), self.config, model)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared AI provider call — used by both TranslateThread and AIJobThread
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _call_provider(system: str, user_text: str, config: 'Config') -> str:
+def _call_provider(system: str, user_text: str, config: 'Config', model: str = "") -> str:
     """Call the configured AI provider with a system + user prompt. Returns result string."""
     import urllib.request, json as _json
     provider = (config.get("translate_provider") or "anthropic").lower()
@@ -956,8 +974,9 @@ def _call_provider(system: str, user_text: str, config: 'Config') -> str:
     if provider == "anthropic":
         if not key:
             return "[set translate_api_key to use Anthropic]"
+        resolved_model = model or "claude-haiku-4-5-20251001"
         payload = _json.dumps({
-            "model": "claude-haiku-4-5-20251001",
+            "model": resolved_model,
             "max_tokens": 1024,
             "system": system,
             "messages": [{"role": "user", "content": user_text}]
@@ -997,8 +1016,9 @@ def _call_provider(system: str, user_text: str, config: 'Config') -> str:
     elif provider == "openai":
         if not key:
             return "[set translate_api_key to use OpenAI]"
+        resolved_model = model or "gpt-4o-mini"
         payload = _json.dumps({
-            "model": "gpt-4o-mini",
+            "model": resolved_model,
             "max_tokens": 1024,
             "messages": [{"role": "system", "content": system},
                          {"role": "user",   "content": user_text}]
@@ -1013,10 +1033,10 @@ def _call_provider(system: str, user_text: str, config: 'Config') -> str:
         return data["choices"][0]["message"]["content"].strip()
 
     elif provider == "ollama":
-        host  = (config.get("translate_ollama_host") or "http://localhost:11434").rstrip("/")
-        model = config.get("translate_ollama_model") or "qwen3:8b"
+        host          = (config.get("translate_ollama_host") or "http://localhost:11434").rstrip("/")
+        resolved_model = model or config.get("translate_ollama_model") or "qwen3:8b"
         payload = _json.dumps({
-            "model": model,
+            "model": resolved_model,
             "prompt": f"{system}\n\n{user_text}",
             "stream": False
         }).encode()
@@ -1045,12 +1065,14 @@ class AICommand:
     unit:          str   # "l" | "p" — context unit
     context_n:     int   # lines/pages each direction (0 = current only)
     system_prompt: str   # system prompt sent to the model
+    tier:          str = "default"  # "fast" | "default" | "powerful"
 
 
 AI_COMMANDS: dict[str, AICommand] = {
     "eb": AICommand(
         key="eb", label="Extrapolate Bookmarks",
         chip_source="bookmarks", unit="l", context_n=0,
+        tier="default",
         system_prompt=(
             "You are a literary assistant helping a reader understand connections between "
             "passages they have bookmarked. Given the following excerpts, identify themes, "
@@ -1060,6 +1082,7 @@ AI_COMMANDS: dict[str, AICommand] = {
     "eh": AICommand(
         key="eh", label="Extrapolate Highlights",
         chip_source="highlights", unit="l", context_n=0,
+        tier="default",
         system_prompt=(
             "You are a literary assistant helping a reader understand connections between "
             "passages they have highlighted. Given the following excerpts, identify themes, "
@@ -1069,6 +1092,7 @@ AI_COMMANDS: dict[str, AICommand] = {
     "cc": AICommand(
         key="cc", label="Cultural Context",
         chip_source="none", unit="l", context_n=0,
+        tier="powerful",
         system_prompt=(
             "You are a literary and cultural historian. Given the following passage, explain "
             "its cultural, historical, or philosophical significance in the context of when and "
@@ -1078,6 +1102,7 @@ AI_COMMANDS: dict[str, AICommand] = {
     "ccb": AICommand(
         key="ccb", label="Cultural Context: Bookmarks",
         chip_source="bookmarks", unit="l", context_n=0,
+        tier="powerful",
         system_prompt=(
             "You are a literary and cultural historian. Given the following bookmarked passages, "
             "explain the cultural, historical, or philosophical significance of each in the context "
@@ -1088,6 +1113,7 @@ AI_COMMANDS: dict[str, AICommand] = {
     "cch": AICommand(
         key="cch", label="Cultural Context: Highlights",
         chip_source="highlights", unit="l", context_n=0,
+        tier="powerful",
         system_prompt=(
             "You are a literary and cultural historian. Given the following highlighted passages, "
             "explain the cultural, historical, or philosophical significance of each in the context "
@@ -1110,8 +1136,16 @@ class AIJobThread(QThread):
 
     def run(self):
         try:
+            provider = (self.config.get("translate_provider") or "anthropic").lower()
+            tier     = self.cmd.tier  # "fast" | "default" | "powerful"
+            if provider == "ollama":
+                model = self.config.get(f"ai_model_ollama_{tier}") or self.config.get("translate_ollama_model") or "qwen3:8b"
+            elif provider == "openai":
+                model = self.config.get(f"ai_model_openai_{tier}") or "gpt-4o-mini"
+            else:
+                model = self.config.get(f"ai_model_{tier}") or ""
             user_text = "\n\n---\n\n".join(self.passages)
-            result    = _call_provider(self.cmd.system_prompt, user_text, self.config)
+            result    = _call_provider(self.cmd.system_prompt, user_text, self.config, model)
             self.result_ready.emit(result)
         except Exception as ex:
             self.result_ready.emit(f"[error: {ex}]")
@@ -1148,6 +1182,7 @@ class WizardOverlay:
 
     APP_STEPS = [
         # (config_key, label, type, choices_or_None, min, max, step)
+        ("ui_language",       "UI language (e.g. fr, ja, de)", "text", None, 0, 0, 0),
         ("current_swatch",    "Colour swatch",        "swatch",  None,           0,   0,   1),
         ("current_font_idx",  "UI font",               "font",    None,           0,   0,   1),
         ("ui_font_offset",    "Font size offset",      "int",     None,          -5,  15,   1),
@@ -1162,6 +1197,9 @@ class WizardOverlay:
             ["anthropic","google","google_official","openai","ollama"], 0, 0, 1),
         ("translate_api_key", "API key",               "text",    None,           0,   0,   0),
         ("translate_target_lang","Translate language (e.g. fr, ja, de)", "text", None, 0, 0, 0),
+        ("ai_model_fast",     "AI model: fast (translation)",  "text", None,      0,   0,   0),
+        ("ai_model_default",  "AI model: default (extrapolate)","text",None,      0,   0,   0),
+        ("ai_model_powerful", "AI model: powerful (cultural context)","text",None,0,   0,   0),
     ]
 
     BOOK_STEPS = [
@@ -1242,6 +1280,12 @@ class WizardOverlay:
                 self.reader.history._save()
         else:
             self.reader.config.set(key, val)
+            # Sync translate_target_lang when ui_language changes
+            if key == "ui_language" and val:
+                old_tl = self.reader.config.get("translate_target_lang") or ""
+                old_ul = self.reader.config.get("ui_language") or ""
+                if not old_tl or old_tl == old_ul:
+                    self.reader.config.set("translate_target_lang", val)
             # Apply dimension globals immediately
             global TOP_BAR_H, BOTTOM_BAR_H, PANEL_W
             if key == "top_bar_h":      TOP_BAR_H    = int(val)
@@ -1272,24 +1316,29 @@ class WizardOverlay:
         font_s = _ui_font(9)
         ROW_H  = max(22, QFontMetrics(font).height() + 14)
 
+        # Confine to PDF viewport (don't cover the margin)
+        vp = self.reader._vp()
+        vx = vp.left()
+        vw = vp.width()
+
         # Overlay strip: bottom 40% of viewport
         oh = int((h - TOP_BAR_H - BOTTOM_BAR_H) * 0.40)
         oy = h - BOTTOM_BAR_H - oh
 
         # Background
         bg = QColor(UI_BG); bg.setAlpha(245)
-        painter.fillRect(QRect(0, oy, w, oh), bg)
+        painter.fillRect(QRect(vx, oy, vw, oh), bg)
         painter.setPen(_mk_pen(AMBER_BRIGHT, 2))
-        painter.drawLine(0, oy, w, oy)
+        painter.drawLine(vx, oy, vx + vw, oy)
 
         # Header row
         kind_lbl = "APP SETUP" if self.kind == "app" else "BOOK SETUP"
         painter.setPen(AMBER_DARK)
         painter.setFont(font_s)
-        painter.drawText(PAD, oy + 14, kind_lbl)
+        painter.drawText(vx + PAD, oy + 14, kind_lbl)
         painter.setPen(AMBER_DIM)
-        hint = "type to edit   Enter confirm   Esc cancel" if self._text_editing else "←/→ change   Enter/↓ next   Esc close"
-        painter.drawText(w - QFontMetrics(font_s).horizontalAdvance(hint) - PAD, oy + 14, hint)
+        hint = "type to edit   Enter confirm   Esc cancel" if self._text_editing else "\u2190/\u2192 change   Enter/\u2193 next   Esc close"
+        painter.drawText(vx + vw - QFontMetrics(font_s).horizontalAdvance(hint) - PAD, oy + 14, hint)
 
         # Scrollable list area
         list_y  = oy + 22
@@ -1305,7 +1354,7 @@ class WizardOverlay:
             self._scroll_offset = self.idx - visible + 1
         self._scroll_offset = max(0, min(self._scroll_offset, max(0, n - visible)))
 
-        painter.setClipRect(QRect(0, list_y, w, list_h))
+        painter.setClipRect(QRect(vx, list_y, vw, list_h))
 
         for i, step in enumerate(self.steps):
             key, label, typ, choices, mn, mx, step_size = step
@@ -1319,48 +1368,47 @@ class WizardOverlay:
             # Row background
             if selected:
                 bg_col = QColor(AMBER.red(), AMBER.green(), AMBER.blue(), 35 if editing else 20)
-                painter.fillRect(QRect(0, row_y, w, ROW_H), bg_col)
+                painter.fillRect(QRect(vx, row_y, vw, ROW_H), bg_col)
 
-            # Label — strip the hint suffix from the label for display
+            # Label
             display_label = label.split(" (e.g.")[0] if " (e.g." in label else label
             painter.setFont(font_b if selected else font)
             painter.setPen(AMBER if selected else AMBER_DIM)
-            painter.drawText(PAD, row_y + ROW_H - 8, display_label)
+            painter.drawText(vx + PAD, row_y + ROW_H - 8, display_label)
 
-            # Hint text for translate_target_lang
+            # Hint text for fields with (e.g. ...) in label
             if selected and " (e.g." in label:
                 hint_part = label[label.index(" (e.g."):]
                 painter.setFont(font_s)
                 painter.setPen(AMBER_DARK)
                 lw = QFontMetrics(font_b).horizontalAdvance(display_label)
-                painter.drawText(PAD + lw + 4, row_y + ROW_H - 8, hint_part)
+                painter.drawText(vx + PAD + lw + 4, row_y + ROW_H - 8, hint_part)
 
             # Value
             if editing:
-                # Show edit buffer with cursor
                 buf = self._text_buffer
-                val_str = buf + "▌"
+                val_str = buf + "\u258c"
                 painter.setFont(font_b)
                 painter.setPen(AMBER_BRIGHT)
-                val_x = w - QFontMetrics(font_b).horizontalAdvance(val_str) - PAD
-                val_x = max(w // 2, val_x)
+                val_x = vx + vw - QFontMetrics(font_b).horizontalAdvance(val_str) - PAD
+                val_x = max(vx + vw // 2, val_x)
                 painter.drawText(val_x, row_y + ROW_H - 8, val_str)
             else:
                 cur     = self._get_val_for(i)
                 val_str = self._val_display(key, typ, choices, cur)
                 painter.setFont(_ui_font(10, bold=True) if selected else font_s)
                 painter.setPen(AMBER_BRIGHT if selected else AMBER_DARK)
-                val_x = w - QFontMetrics(painter.font()).horizontalAdvance(val_str) - PAD
+                val_x = vx + vw - QFontMetrics(painter.font()).horizontalAdvance(val_str) - PAD
                 if selected and typ not in ("text", "path"):
                     painter.setPen(AMBER_DIM)
-                    painter.drawText(val_x - 18, row_y + ROW_H - 8, "‹")
-                    painter.drawText(w - PAD - 6, row_y + ROW_H - 8, "›")
+                    painter.drawText(val_x - 18, row_y + ROW_H - 8, "\u2039")
+                    painter.drawText(vx + vw - PAD - 6, row_y + ROW_H - 8, "\u203a")
                     painter.setPen(AMBER_BRIGHT)
                 elif selected and typ in ("text", "path"):
-                    painter.setPen(AMBER_DIM)
                     enter_hint = "  [Enter to edit]"
+                    painter.setPen(AMBER_DIM)
                     painter.setFont(font_s)
-                    painter.drawText(w - QFontMetrics(font_s).horizontalAdvance(enter_hint) - PAD,
+                    painter.drawText(vx + vw - QFontMetrics(font_s).horizontalAdvance(enter_hint) - PAD,
                                      row_y + ROW_H - 8, enter_hint)
                     painter.setFont(_ui_font(10, bold=True))
                     painter.setPen(AMBER_BRIGHT)
@@ -1369,7 +1417,7 @@ class WizardOverlay:
             # Divider
             if not selected:
                 painter.setPen(_mk_pen(QColor(40, 40, 40), 1))
-                painter.drawLine(PAD, row_y + ROW_H - 1, w - PAD, row_y + ROW_H - 1)
+                painter.drawLine(vx + PAD, row_y + ROW_H - 1, vx + vw - PAD, row_y + ROW_H - 1)
 
         painter.setClipping(False)
 
@@ -1962,6 +2010,19 @@ class ReaderWidget(QWidget):
 
         font_b = _ui_font(9, bold=True)
         font   = _ui_font(9)
+        ty     = TOP_BAR_H - 8
+
+        # Close button — square flush to top-right, inset from margin if margin is right
+        btn_sz = TOP_BAR_H
+        side   = self._margin_side()
+        btn_x  = (w - PANEL_W - btn_sz) if side == "right" else (w - btn_sz)
+        self._close_btn_rect = QRect(btn_x, 0, btn_sz, btn_sz)
+        bw = self._bw()
+        painter.setPen(_mk_pen(AMBER_DARK, bw))
+        painter.drawRect(self._close_btn_rect)
+        painter.setFont(_ui_font(10, bold=True))
+        painter.setPen(AMBER_DIM)
+        painter.drawText(self._close_btn_rect, Qt.AlignmentFlag.AlignCenter, "×")
         ty     = TOP_BAR_H - 8
 
         if self.document and self.document.lines:
@@ -2557,7 +2618,9 @@ class ReaderWidget(QWidget):
             ("removeall+",  "Wipe ALL stored data for this book"),
         ]),
         ("AI COMMANDS", None, [
-            ("", "AI commands use the configured translate_provider and translate_api_key."),
+            ("", "AI commands use translate_provider / translate_api_key."),
+            ("", "Model tier: fast=translation  default=extrapolate  powerful=cultural context"),
+            ("", "Configure model names in app settings (? key) or via :set ai_model_<tier>"),
             ("", ""),
             ("eb[l|p][N]",  "Extrapolate Bookmarks — select bookmarks, find themes/connections"),
             ("eh[l|p][N]",  "Extrapolate Highlights — select highlights, find themes/connections"),
@@ -2565,7 +2628,7 @@ class ReaderWidget(QWidget):
             ("ccb[N]",      "Cultural Context: Bookmarks — select bookmarks for cultural analysis"),
             ("cch[N]",      "Cultural Context: Highlights — select highlights for cultural analysis"),
             ("",            ""),
-            ("", "Append 0 to reuse last selection with a new command:  cc0  ebl0  ehp0"),
+            ("", "Append 0 to reuse last selection:  cc0  ebl0  ehp0"),
             ("", "In chip selection: ↑↓ scroll, Space toggle, Enter finish, Esc cancel"),
             ("", "Result panel: scroll with wheel, Esc to dismiss"),
         ]),
@@ -2628,7 +2691,7 @@ class ReaderWidget(QWidget):
         ("FILES", None, [
             ("~/.scrollreader/config.json",  "Global configuration"),
             ("~/.scrollreader/history.json", "Per-book history, annotations, and metadata"),
-            ("fonts/",                       "Drop .ttf/.otf/.otb here to add fonts"),
+            ("fonts/",                       "Drop .ttf/.otf/.otb here to add fonts (bundled: DotGothic16, IBM PS-55, Inconsolata, Anonymous Pro)"),
             ("", "All data files are plain JSON — safe to edit in any text editor."),
         ]),
         ("PRINT", None, [
@@ -3171,15 +3234,22 @@ class ReaderWidget(QWidget):
             self._step(-(delta//120))
 
     def mousePressEvent(self, ev: QMouseEvent):
-        if self.panel and ev.button() == Qt.MouseButton.LeftButton:
+        if ev.button() == Qt.MouseButton.LeftButton:
             pos = ev.pos()
-            for rect, line_idx in self._panel_rects:
-                if rect.contains(pos):
-                    self.panel = None
-                    self.current_line = max(0, min(len(self.document.lines)-1, line_idx))
-                    self.history.set_line(self.document.filepath, self.current_line)
-                    self.update()
-                    return
+            # Close button
+            if getattr(self, '_close_btn_rect', None) and self._close_btn_rect.contains(pos):
+                from PyQt6.QtWidgets import QApplication as _QApp
+                _QApp.quit()
+                return
+            # Annotation panel click-to-jump
+            if self.panel:
+                for rect, line_idx in self._panel_rects:
+                    if rect.contains(pos):
+                        self.panel = None
+                        self.current_line = max(0, min(len(self.document.lines)-1, line_idx))
+                        self.history.set_line(self.document.filepath, self.current_line)
+                        self.update()
+                        return
         super().mousePressEvent(ev)
 
     # --------------------------------------------------------- navigation
@@ -5765,6 +5835,14 @@ class LibraryWidget(QWidget):
         if k in (Qt.Key.Key_Up, Qt.Key.Key_W):
             if self._book_rects: self._cursor_idx = max(0, self._cursor_idx-1)
             self.update(); return
+        if k == Qt.Key.Key_Slash:
+            mw = self.parent()
+            mw.reader._open_panel("ScrollReader — Command Reference", "help")
+            self.hide(); mw.reader.setFocus(); return
+        if k == Qt.Key.Key_Question:
+            mw = self.parent()
+            mw.reader._open_settings_wizard()
+            self.hide(); mw.reader.setFocus(); return
 
 
     def focusOutEvent(self, ev):
