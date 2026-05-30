@@ -1220,7 +1220,7 @@ class WizardOverlay:
         elif typ == "bool":
             self._apply(key, not bool(cur))
         elif typ == "int":
-            self._apply(key, max(int(mn), min(int(mx), int(cur or mn) + direction * int(step))))
+            self._apply(key, max(int(mn), min(int(mx), int(cur if cur is not None else mn) + direction * int(step))))
         elif typ == "color":
             c = QColor(cur or "#ffb000")
             h, s, v, _ = c.getHsvF()
@@ -1392,9 +1392,10 @@ class WizardOverlay:
         self._text_buffer  = ""
         self.reader.update()
 
-    def handle_text_key(self, key: int, text: str):
+    def handle_text_key(self, key: int, text: str, ctrl: bool = False):
         """Handle a keypress while in text editing mode. Returns True if consumed."""
         from PyQt6.QtCore import Qt as _Qt
+        from PyQt6.QtWidgets import QApplication as _QApp
         if key in (_Qt.Key.Key_Return, _Qt.Key.Key_Enter):
             self.commit_text_edit(); return True
         if key == _Qt.Key.Key_Escape:
@@ -1402,6 +1403,12 @@ class WizardOverlay:
         if key == _Qt.Key.Key_Backspace:
             self._text_buffer = self._text_buffer[:-1]
             self.reader.update(); return True
+        if ctrl and key == _Qt.Key.Key_V:
+            clip = _QApp.clipboard().text()
+            if clip:
+                self._text_buffer += clip.strip()
+                self.reader.update()
+            return True
         if text and text.isprintable():
             self._text_buffer += text
             self.reader.update(); return True
@@ -2476,7 +2483,8 @@ class ReaderWidget(QWidget):
             ("B",   "Toggle bookmarks panel"),
             ("H",   "Toggle highlights panel"),
             ("I",   "Toggle PDF colour inversion  (per-book, remembered)"),
-            ("?",   "This help panel"),
+            ("?  (Shift+/)",             "Open settings  (book settings if reading, app settings if in library)"),
+            ("/",                        "This help / command reference"),
         ]),
         ("KEYS — CTRL SHORTCUTS", None, [
             ("Ctrl+Space / Ctrl+Enter", "Open command bar"),
@@ -2629,7 +2637,9 @@ class ReaderWidget(QWidget):
             ("", "Requires PyQt6.QtPrintSupport."),
         ]),
         ("OTHER", None, [
-            ("help  /  man  /  ?",  "Show this help panel"),
+            ("settings",                 "Open settings (smart: book if reading, app if in library)"),
+            ("appsettings  /  setup",    "Open app settings wizard"),
+            ("pdfsettings  /  bookwizard","Open per-book settings wizard"),
             ("q  /  quit  /  exit", "Quit ScrollReader"),
         ]),
     ]
@@ -2711,7 +2721,7 @@ class ReaderWidget(QWidget):
 
             # Text editing mode — route all input through handler
             if wz._text_editing:
-                wz.handle_text_key(k, ev.text())
+                wz.handle_text_key(k, ev.text(), ctrl)
                 return
 
             if k in (Qt.Key.Key_Escape, Qt.Key.Key_Tab):
@@ -3095,8 +3105,10 @@ class ReaderWidget(QWidget):
                 self.update()
         elif k == Qt.Key.Key_J:
             self._open_search_panel()
-        elif k in (Qt.Key.Key_Question, Qt.Key.Key_Slash):
+        elif k == Qt.Key.Key_Slash:
             self._open_panel("ScrollReader — Command Reference", "help")
+        elif k == Qt.Key.Key_Question:
+            self._open_settings_wizard()
         elif k == Qt.Key.Key_G:
             if ev.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 # G = bottom of document
@@ -3955,6 +3967,15 @@ class ReaderWidget(QWidget):
             self.current_line       = self._middle_line()
         self.update()
 
+    def _open_settings_wizard(self):
+        """Smart settings opener: book wizard if reading with a doc, app wizard if in library or no doc."""
+        mw = self.window()
+        library_visible = hasattr(mw, 'library') and mw.library.isVisible()
+        if library_visible or not self.document:
+            self._open_wizard("app")
+        else:
+            self._open_wizard("book")
+
     def _close_wizard(self):
         """Close wizard, restore line, mark app wizard done."""
         wz = self._wizard
@@ -4056,11 +4077,13 @@ class ReaderWidget(QWidget):
             if not self.document: return "no document open"
             self._translate_line()
             return None
-        if cmd in ("wizard", "setup"):
+        if cmd in ("wizard", "setup", "appsettings", "appsetting"):
             self._open_wizard("app"); return None
-        if cmd in ("bookwizard", "bwizard"):
+        if cmd in ("bookwizard", "bwizard", "pdfsettings", "booksettings", "pdfsetting"):
             if not self.document: return "no document open"
             self._open_wizard("book"); return None
+        if cmd in ("settings",):
+            self._open_settings_wizard(); return None
         if cmd in ("help","man","?"):        return self._open_panel("ScrollReader — Command Reference", "help")
 
         # Search commands
