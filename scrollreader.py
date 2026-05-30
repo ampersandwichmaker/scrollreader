@@ -2078,9 +2078,6 @@ class ReaderWidget(QWidget):
         ind_col.setAlpha(int(self._cfg("highlight_alpha") or 35))
         painter.fillRect(QRect(px, ind_y-2, self.document.max_width, lh), ind_col)
 
-        # ── Progress bar (before margin so indicators paint on top) ──────────
-        self._paint_vu_meter(painter)
-
         # ── Margins ────────────────────────────────────────────────────────
         self._paint_margin(painter, scroll, voff, vp, dlines, total, lh, ind_y)
 
@@ -2259,6 +2256,9 @@ class ReaderWidget(QWidget):
 
         # Background
         painter.fillRect(mr, UI_BG)
+
+        # Progress bar — behind all margin content, scrollbar, and indicators
+        self._paint_vu_meter(painter)
 
         # Border line (on the PDF side)
         painter.setPen(_mk_pen(AMBER_DARK, self._bw()))
