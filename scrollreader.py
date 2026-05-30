@@ -1150,20 +1150,18 @@ class WizardOverlay:
         # (config_key, label, type, choices_or_None, min, max, step)
         ("current_swatch",    "Colour swatch",        "swatch",  None,           0,   0,   1),
         ("current_font_idx",  "UI font",               "font",    None,           0,   0,   1),
-        ("ui_font_offset",    "Font size offset",      "int",     None,          -6,  10,   1),
+        ("ui_font_offset",    "Font size offset",      "int",     None,          -5,  15,   1),
         ("top_bar_h",         "Top bar height",        "int",     None,          16,  60,   2),
         ("bottom_bar_h",      "Bottom bar height",     "int",     None,          16,  60,   2),
         ("panel_w",           "Panel width",           "int",     None,          80, 400,   5),
         ("ui_border_width",   "Border thickness",      "int",     None,           1,  10,   1),
         ("indicator_color",   "Indicator/HL color",    "color",   None,           0,   0,   5),
-        ("highlight_height",  "Highlight height",      "int",     None,           4,  60,   2),
-        ("highlight_alpha",   "Highlight opacity",     "int",     None,           0, 255,  10),
         ("margin_side",       "Margin side",           "choice",  ["right","left"],0,  0,   1),
         ("library_dir",       "Library folder",        "path",    None,           0,   0,   0),
         ("translate_provider","Translate provider",    "choice",
             ["anthropic","google","google_official","openai","ollama"], 0, 0, 1),
         ("translate_api_key", "API key",               "text",    None,           0,   0,   0),
-        ("translate_target_lang","Translate language", "text",    None,           0,   0,   0),
+        ("translate_target_lang","Translate language (e.g. fr, ja, de)", "text", None, 0, 0, 0),
     ]
 
     BOOK_STEPS = [
@@ -1171,6 +1169,7 @@ class WizardOverlay:
         ("zoom_mode",         "Zoom mode",             "choice",
             ["fit-width","fit-page","50%","75%","100%","110%","120%"], 0, 0, 1),
         ("highlight_height",  "Highlight line height", "int",     None,           4,  60,   2),
+        ("highlight_alpha",   "Highlight opacity",     "int",     None,           0, 255,  10),
         ("margin_side",       "Margin side",           "choice",  ["right","left"],0,  0,   1),
     ]
 
@@ -1180,6 +1179,9 @@ class WizardOverlay:
         self.steps   = self.APP_STEPS if kind == "app" else self.BOOK_STEPS
         self.idx     = 0      # current step index
         self.done    = False
+        self._scroll_offset  = 0
+        self._text_editing   = False   # True when typing into a text/path field
+        self._text_buffer    = ""      # current edit buffer
 
     def current(self):
         return self.steps[self.idx]
@@ -1264,11 +1266,11 @@ class WizardOverlay:
 
     def paint(self, painter: QPainter, w: int, h: int):
         n      = len(self.steps)
-        ROW_H  = 28
         PAD    = 12
         font_b = _ui_font(10, bold=True)
         font   = _ui_font(10)
         font_s = _ui_font(9)
+        ROW_H  = max(22, QFontMetrics(font).height() + 14)
 
         # Overlay strip: bottom 40% of viewport
         oh = int((h - TOP_BAR_H - BOTTOM_BAR_H) * 0.40)
@@ -1286,17 +1288,15 @@ class WizardOverlay:
         painter.setFont(font_s)
         painter.drawText(PAD, oy + 14, kind_lbl)
         painter.setPen(AMBER_DIM)
-        painter.drawText(w - 100, oy + 14,
-            "←/→ change   Esc close")
+        hint = "type to edit   Enter confirm   Esc cancel" if self._text_editing else "←/→ change   Enter/↓ next   Esc close"
+        painter.drawText(w - QFontMetrics(font_s).horizontalAdvance(hint) - PAD, oy + 14, hint)
 
         # Scrollable list area
         list_y  = oy + 22
         list_h  = oh - 22 - 4
-        visible = list_h // ROW_H
+        visible = max(1, list_h // ROW_H)
 
         # Auto-scroll to keep selected item visible
-        if not hasattr(self, '_scroll_offset'):
-            self._scroll_offset = 0
         top_vis = self._scroll_offset
         bot_vis = self._scroll_offset + visible - 1
         if self.idx < top_vis:
@@ -1314,29 +1314,57 @@ class WizardOverlay:
                 continue
 
             selected = (i == self.idx)
+            editing  = selected and self._text_editing
 
             # Row background
             if selected:
-                painter.fillRect(QRect(0, row_y, w, ROW_H), QColor(AMBER.red(), AMBER.green(), AMBER.blue(), 20))
+                bg_col = QColor(AMBER.red(), AMBER.green(), AMBER.blue(), 35 if editing else 20)
+                painter.fillRect(QRect(0, row_y, w, ROW_H), bg_col)
 
-            # Label
+            # Label — strip the hint suffix from the label for display
+            display_label = label.split(" (e.g.")[0] if " (e.g." in label else label
             painter.setFont(font_b if selected else font)
             painter.setPen(AMBER if selected else AMBER_DIM)
-            painter.drawText(PAD, row_y + ROW_H - 8, label)
+            painter.drawText(PAD, row_y + ROW_H - 8, display_label)
+
+            # Hint text for translate_target_lang
+            if selected and " (e.g." in label:
+                hint_part = label[label.index(" (e.g."):]
+                painter.setFont(font_s)
+                painter.setPen(AMBER_DARK)
+                lw = QFontMetrics(font_b).horizontalAdvance(display_label)
+                painter.drawText(PAD + lw + 4, row_y + ROW_H - 8, hint_part)
 
             # Value
-            cur     = self._get_val_for(i)
-            val_str = self._val_display(key, typ, choices, cur)
-            painter.setFont(_ui_font(10, bold=True) if selected else font_s)
-            painter.setPen(AMBER_BRIGHT if selected else AMBER_DARK)
-            val_x = w - QFontMetrics(painter.font()).horizontalAdvance(val_str) - PAD
-            if selected:
-                # Draw arrows around value
-                painter.setPen(AMBER_DIM)
-                painter.drawText(val_x - 18, row_y + ROW_H - 8, "‹")
-                painter.drawText(w - PAD - 6, row_y + ROW_H - 8, "›")
+            if editing:
+                # Show edit buffer with cursor
+                buf = self._text_buffer
+                val_str = buf + "▌"
+                painter.setFont(font_b)
                 painter.setPen(AMBER_BRIGHT)
-            painter.drawText(val_x, row_y + ROW_H - 8, val_str)
+                val_x = w - QFontMetrics(font_b).horizontalAdvance(val_str) - PAD
+                val_x = max(w // 2, val_x)
+                painter.drawText(val_x, row_y + ROW_H - 8, val_str)
+            else:
+                cur     = self._get_val_for(i)
+                val_str = self._val_display(key, typ, choices, cur)
+                painter.setFont(_ui_font(10, bold=True) if selected else font_s)
+                painter.setPen(AMBER_BRIGHT if selected else AMBER_DARK)
+                val_x = w - QFontMetrics(painter.font()).horizontalAdvance(val_str) - PAD
+                if selected and typ not in ("text", "path"):
+                    painter.setPen(AMBER_DIM)
+                    painter.drawText(val_x - 18, row_y + ROW_H - 8, "‹")
+                    painter.drawText(w - PAD - 6, row_y + ROW_H - 8, "›")
+                    painter.setPen(AMBER_BRIGHT)
+                elif selected and typ in ("text", "path"):
+                    painter.setPen(AMBER_DIM)
+                    enter_hint = "  [Enter to edit]"
+                    painter.setFont(font_s)
+                    painter.drawText(w - QFontMetrics(font_s).horizontalAdvance(enter_hint) - PAD,
+                                     row_y + ROW_H - 8, enter_hint)
+                    painter.setFont(_ui_font(10, bold=True))
+                    painter.setPen(AMBER_BRIGHT)
+                painter.drawText(val_x, row_y + ROW_H - 8, val_str)
 
             # Divider
             if not selected:
@@ -1344,6 +1372,46 @@ class WizardOverlay:
                 painter.drawLine(PAD, row_y + ROW_H - 1, w - PAD, row_y + ROW_H - 1)
 
         painter.setClipping(False)
+
+    def start_text_edit(self):
+        """Enter inline text editing mode for the current text/path field."""
+        cur = self._get_val_for(self.idx)
+        self._text_buffer  = str(cur or "")
+        self._text_editing = True
+        self.reader.update()
+
+    def commit_text_edit(self):
+        """Confirm text edit and apply."""
+        key = self.steps[self.idx][0]
+        self._apply(key, self._text_buffer)
+        self._text_editing = False
+        self.reader.update()
+
+    def cancel_text_edit(self):
+        self._text_editing = False
+        self._text_buffer  = ""
+        self.reader.update()
+
+    def handle_text_key(self, key: int, text: str):
+        """Handle a keypress while in text editing mode. Returns True if consumed."""
+        from PyQt6.QtCore import Qt as _Qt
+        if key in (_Qt.Key.Key_Return, _Qt.Key.Key_Enter):
+            self.commit_text_edit(); return True
+        if key == _Qt.Key.Key_Escape:
+            self.cancel_text_edit(); return True
+        if key == _Qt.Key.Key_Backspace:
+            self._text_buffer = self._text_buffer[:-1]
+            self.reader.update(); return True
+        if text and text.isprintable():
+            self._text_buffer += text
+            self.reader.update(); return True
+        return True  # eat everything else while editing
+
+    def handle_paste(self, text: str):
+        """Paste text into edit buffer."""
+        if self._text_editing:
+            self._text_buffer += text.strip()
+            self.reader.update()
 
     def _get_val_for(self, idx: int):
         """Get current value for step at index idx."""
@@ -2640,6 +2708,12 @@ class ReaderWidget(QWidget):
         if self._wizard and not self._wizard.done:
             wz  = self._wizard
             typ = wz.current()[2]
+
+            # Text editing mode — route all input through handler
+            if wz._text_editing:
+                wz.handle_text_key(k, ev.text())
+                return
+
             if k in (Qt.Key.Key_Escape, Qt.Key.Key_Tab):
                 self._close_wizard()
             elif k in (Qt.Key.Key_Left, Qt.Key.Key_A) and typ not in ("text","path"):
@@ -2648,9 +2722,21 @@ class ReaderWidget(QWidget):
                 wz.adjust(1)
             elif k in (Qt.Key.Key_Up, Qt.Key.Key_W):
                 wz.idx = max(0, wz.idx - 1); self.update()
-            elif k in (Qt.Key.Key_Down, Qt.Key.Key_S,
-                       Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            elif k in (Qt.Key.Key_Down, Qt.Key.Key_S):
                 wz.idx = min(len(wz.steps) - 1, wz.idx + 1); self.update()
+            elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                if typ in ("text", "path"):
+                    wz.start_text_edit()
+                else:
+                    wz.idx = min(len(wz.steps) - 1, wz.idx + 1); self.update()
+            elif ctrl and k == Qt.Key.Key_V:
+                # Paste into text field — enter edit mode if needed then paste
+                from PyQt6.QtWidgets import QApplication as _QApp
+                clip = _QApp.clipboard().text()
+                if clip:
+                    if not wz._text_editing and typ in ("text", "path"):
+                        wz.start_text_edit()
+                    wz.handle_paste(clip)
             return   # eat everything else
 
         # ── AI chip selection mode ────────────────────────────────────────
@@ -2910,11 +2996,11 @@ class ReaderWidget(QWidget):
             if k == Qt.Key.Key_R:
                 self._cycle_font(1); return
             if k == Qt.Key.Key_D:
-                _UI_FONT_OFFSET_ref[0] = max(-6, _UI_FONT_OFFSET_ref[0] - 1)
+                _UI_FONT_OFFSET_ref[0] = max(-5, _UI_FONT_OFFSET_ref[0] - 1)
                 self.config.set("ui_font_offset", str(_UI_FONT_OFFSET_ref[0]))
                 self._update_cmd_style(); self.update(); return
             if k == Qt.Key.Key_F:
-                _UI_FONT_OFFSET_ref[0] += 1
+                _UI_FONT_OFFSET_ref[0] = min(15, _UI_FONT_OFFSET_ref[0] + 1)
                 self.config.set("ui_font_offset", str(_UI_FONT_OFFSET_ref[0]))
                 self._update_cmd_style(); self.update(); return
             if k == Qt.Key.Key_J:
