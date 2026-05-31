@@ -1749,9 +1749,14 @@ class ReaderWidget(QWidget):
         else:
             self._resize_timer = QTimer(self)
             self._resize_timer.setSingleShot(True)
-            self._resize_timer.timeout.connect(self._clear_status)
-        self._resize_timer.start(1500)
+            self._resize_timer.timeout.connect(self._on_resize_done)
+        self._resize_timer.start(150)
         super().resizeEvent(ev)
+
+    def _on_resize_done(self):
+        self._clear_status()
+        if self.document and self.zoom_mode in ("fit-width", "fit-page"):
+            self._rerender()
 
     def _enter_command_mode(self):
         if time.time() < self._cmd_cooldown:
@@ -1981,6 +1986,10 @@ class ReaderWidget(QWidget):
             self.status_text = f"zoom error: {ex}"
         self.update()
 
+    def _rerender_and_clear_pending(self):
+        self._rerender_pending = False
+        self._rerender()
+
     # -------------------------------------------------------------- helpers
 
     def _margin_side(self) -> str:
@@ -2115,6 +2124,15 @@ class ReaderWidget(QWidget):
         vp     = self._vp()
         dlines = self.document.lines
         total  = len(dlines)
+
+        # If zoom mode is viewport-relative and the viewport has changed since
+        # we last rendered, trigger a rerender (handles maximise-then-load on Windows)
+        if self.zoom_mode in ("fit-width", "fit-page") and not getattr(self, '_rerender_pending', False):
+            expected_zoom = self._compute_zoom_for_doc(self.zoom_mode, self.document)
+            if abs(expected_zoom - self.document.zoom) > 0.05:
+                self._rerender_pending = True
+                QTimer.singleShot(0, self._rerender_and_clear_pending)
+                return
 
         # ── Pages ─────────────────────────────────────────────────────────
         inv = _pdf_invert_ref[0]
