@@ -103,6 +103,7 @@ DEFAULT_SWATCH = [
 ]
 
 _UI_FONT_FAMILY_ref = ["Courier New"]   # mutable ref — use _UI_FONT_FAMILY_ref[0]
+_SCREEN_WIDTH_ref   = [1920]            # set in main() before any windows are created
 
 
 def _app_dir() -> str:
@@ -1639,7 +1640,6 @@ class ReaderWidget(QWidget):
         self._render_thread: Optional[RenderThread] = None
         self._cache_lo: int = 0
         self._cache_hi: int = 0
-        self._zoom_deferred: bool = False   # True when zoom needs recompute at paint time
         self._cmd_history:   list[str] = []
         self._cmd_history_idx: int     = -1
         # New state
@@ -1838,10 +1838,6 @@ class ReaderWidget(QWidget):
             if is_new_book:
                 QTimer.singleShot(100, lambda: self._open_wizard("book"))
 
-            # Defer zoom recompute to first paint — ensures self.width() is maximized
-            if self.zoom_mode in ("fit-width", "fit-page"):
-                self._zoom_deferred = True
-
         except Exception as ex:
             self.status_text = f"error: {ex}"; self.update()
 
@@ -1948,8 +1944,8 @@ class ReaderWidget(QWidget):
     # ---------------------------------------------------------------- zoom
 
     def _fit_width_zoom(self, nw: float) -> float:
-        """Zoom for fit-width. Uses self.width() — must be called when window is sized."""
-        uw = max(self.width(), 400) - 40
+        """Zoom using screen width captured at startup — always correct."""
+        uw = _SCREEN_WIDTH_ref[0] - 40
         return max(0.1, uw / nw)
 
     def _compute_zoom_for_doc(self, mode: str, doc: 'PDFDocument') -> float:
@@ -2137,14 +2133,6 @@ class ReaderWidget(QWidget):
         vp     = self._vp()
         dlines = self.document.lines
         total  = len(dlines)
-
-        # Deferred zoom: recompute now that self.width() reflects actual maximized size
-        if self._zoom_deferred:
-            self._zoom_deferred = False
-            correct = self._compute_zoom_for_doc(self.zoom_mode, self.document)
-            if abs(correct - self.document.zoom) > 0.05:
-                QTimer.singleShot(0, self._rerender)
-                return
 
         # ── Pages ─────────────────────────────────────────────────────────
         inv = _pdf_invert_ref[0]
@@ -6982,6 +6970,12 @@ def main():
     except AttributeError:
         pass   # older PyQt6 builds don't have this — env vars above are sufficient
     app = QApplication(sys.argv)
+    # Capture screen width now — before any windows are created or shown.
+    # This is the only reliable moment: availableGeometry() is accurate and
+    # self.width() on any widget is still meaningless.
+    screen = app.primaryScreen()
+    if screen:
+        _SCREEN_WIDTH_ref[0] = screen.availableGeometry().width()
     app.setApplicationName("ScrollReader")
     _load_vga_font()
     # Preload all bundled fonts so Qt knows about them
