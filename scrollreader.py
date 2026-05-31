@@ -1232,16 +1232,22 @@ class WizardOverlay:
         ("library_dir",       "Library folder",        "path",    None,           0,   0,   0),
         ("max_cached_pages",  "Max cached pages (0=unlimited)", "int", None,      0, 2000, 50),
         ("max_cache_mb",      "Max cache RAM MB (0=use page limit)", "int", None, 0, 32768, 256),
+        # ── Actions ───────────────────────────────────────────────────────
+        ("__revert__",        "Revert to defaults",    "action",  None,           0,   0,   0),
+        ("__exit__",          "Exit settings",         "action",  None,           0,   0,   0),
     ]
 
     BOOK_STEPS = [
         ("pdf_invert",        "Invert PDF colors",     "bool",    None,           0,   1,   1),
-        ("zoom_mode",         "Zoom mode",             "choice",
-            ["fit-width","fit-page","50%","75%","100%","110%","120%"], 0, 0, 1),
-        ("indicator_color",   "Line indicator color",  "color",   None,           0,   0,   5),
         ("highlight_height",  "Highlight line height", "int",     None,           4, 100,   2),
         ("highlight_alpha",   "Highlight opacity",     "int",     None,           0, 255,  10),
+        ("indicator_color",   "Highlight color",       "color",   None,           0,   0,   5),
         ("margin_side",       "Margin side",           "choice",  ["right","left"],0,  0,   1),
+        ("zoom_mode",         "Zoom mode",             "choice",
+            ["fit-width","fit-page","50%","75%","100%","110%","120%"], 0, 0, 1),
+        # ── Actions ───────────────────────────────────────────────────────
+        ("__revert__",        "Revert to defaults",    "action",  None,           0,   0,   0),
+        ("__exit__",          "Exit settings",         "action",  None,           0,   0,   0),
     ]
 
     # Sentinel step used as a visual section divider in combined mode
@@ -1262,9 +1268,10 @@ class WizardOverlay:
             self.steps = self.APP_STEPS
         self.idx     = 0      # current step index
         self.done    = False
-        self._scroll_offset  = 0
-        self._text_editing   = False
-        self._text_buffer    = ""
+        self._scroll_offset      = 0
+        self._text_editing       = False
+        self._text_buffer        = ""
+        self._confirm_revert     = False  # True when showing y/n revert prompt
 
     def current(self):
         return self.steps[self.idx]
@@ -1287,6 +1294,7 @@ class WizardOverlay:
     def adjust(self, direction: int):
         if self._is_divider(self.idx): return
         key, label, typ, choices, mn, mx, step = self.current()
+        if typ == "action": return
         cur = self.get_val()
         if typ == "swatch":
             idx = SWATCH_NAMES.index(cur) if cur in SWATCH_NAMES else 0
@@ -1426,6 +1434,33 @@ class WizardOverlay:
                 painter.setPen(_mk_pen(AMBER_DARK, 1))
                 painter.drawLine(vx, row_y + ROW_H - 1, vx + vw, row_y + ROW_H - 1)
                 continue
+
+            # Action row (revert / exit)
+            if typ == "action":
+                is_revert = key == "__revert__"
+                if selected:
+                    painter.fillRect(QRect(vx, row_y, vw, ROW_H),
+                                     QColor(AMBER.red(), AMBER.green(), AMBER.blue(), 25))
+                painter.setFont(font_b if selected else font)
+                painter.setPen(AMBER if selected else AMBER_DARK)
+                painter.drawText(vx + PAD, row_y + ROW_H - 8, label)
+                if selected:
+                    if is_revert and self._confirm_revert:
+                        # Show y/n prompt
+                        painter.setFont(font_b)
+                        painter.setPen(AMBER_BRIGHT)
+                        painter.drawText(vx + vw // 2, row_y + ROW_H - 8,
+                                         "Reset all to defaults?  Y = confirm   N / Esc = cancel")
+                    elif selected:
+                        painter.setFont(font_s)
+                        painter.setPen(AMBER_DARK)
+                        hint = "[Enter]"
+                        painter.drawText(vx + vw - QFontMetrics(font_s).horizontalAdvance(hint) - PAD,
+                                         row_y + ROW_H - 8, hint)
+                if not selected:
+                    painter.setPen(_mk_pen(QColor(40, 40, 40), 1))
+                    painter.drawLine(vx + PAD, row_y + ROW_H - 1, vx + vw - PAD, row_y + ROW_H - 1)
+                continue
             if selected:
                 bg_col = QColor(AMBER.red(), AMBER.green(), AMBER.blue(), 35 if editing else 20)
                 painter.fillRect(QRect(vx, row_y, vw, ROW_H), bg_col)
@@ -1486,6 +1521,16 @@ class WizardOverlay:
                 painter.drawLine(vx + PAD, row_y + ROW_H - 1, vx + vw - PAD, row_y + ROW_H - 1)
 
         painter.setClipping(False)
+
+    def _do_revert(self):
+        """Reset all settings in the current wizard to their DEFAULT_CONFIG values."""
+        steps = [s for s in self.steps if s[2] not in ("divider", "action")]
+        for key, label, typ, choices, mn, mx, step in steps:
+            default = DEFAULT_CONFIG.get(key)
+            if default is not None:
+                self._apply(key, default)
+        self._confirm_revert = False
+        self.reader.update()
 
     def start_text_edit(self):
         """Enter inline text editing mode for the current text/path field."""
@@ -2967,6 +3012,15 @@ class ReaderWidget(QWidget):
                 wz.handle_text_key(k, ev.text(), ctrl)
                 return
 
+            # Revert confirm — eat Y/N
+            if wz._confirm_revert:
+                if ev.text().lower() == 'y':
+                    wz._do_revert()
+                else:
+                    wz._confirm_revert = False
+                    self.update()
+                return
+
             if k in (Qt.Key.Key_Escape, Qt.Key.Key_Tab):
                 self._close_wizard()
             elif k in (Qt.Key.Key_Left, Qt.Key.Key_A) and typ not in ("text","path"):
@@ -2974,11 +3028,23 @@ class ReaderWidget(QWidget):
             elif k in (Qt.Key.Key_Right, Qt.Key.Key_D) and typ not in ("text","path"):
                 wz.adjust(1)
             elif k in (Qt.Key.Key_Up, Qt.Key.Key_W):
+                wz._confirm_revert = False
                 wz._nav(-1); self.update()
             elif k in (Qt.Key.Key_Down, Qt.Key.Key_S):
+                wz._confirm_revert = False
                 wz._nav(1); self.update()
             elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                if typ in ("text", "path"):
+                if typ == "action":
+                    if wz.current()[0] == "__exit__":
+                        self._close_wizard(); return
+                    elif wz.current()[0] == "__revert__":
+                        if wz._confirm_revert:
+                            wz._do_revert()
+                        else:
+                            wz._confirm_revert = True
+                            self.update()
+                        return
+                elif typ in ("text", "path"):
                     wz.start_text_edit()
                 else:
                     wz._nav(1); self.update()
