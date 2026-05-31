@@ -6877,14 +6877,16 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    # HiDPI: let Qt handle scaling automatically; disable fractional rounding
-    # that causes blurry rendering on high-DPI displays (common on CAD laptops)
+    # HiDPI: let Qt handle scaling automatically
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING",   "1")
-    from PyQt6.QtCore import Qt as _Qt
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        _Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    app     = QApplication(sys.argv)
+    try:
+        from PyQt6.QtCore import Qt as _Qt
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            _Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    except AttributeError:
+        pass   # older PyQt6 builds don't have this — env vars above are sufficient
+    app = QApplication(sys.argv)
     app.setApplicationName("ScrollReader")
     _load_vga_font()
     # Preload all bundled fonts so Qt knows about them
