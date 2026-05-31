@@ -1740,6 +1740,13 @@ class ReaderWidget(QWidget):
             }}
         """)
 
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        path = getattr(self, '_pending_initial_load', None)
+        if path:
+            self._pending_initial_load = None
+            QTimer.singleShot(0, lambda: self.load_document(path))
+
     def resizeEvent(self, ev):
         self.cmd.setGeometry(0, self.height()-BOTTOM_BAR_H, self.width(), BOTTOM_BAR_H)
         # Show dimensions while resizing
@@ -6843,7 +6850,14 @@ class MainWindow(QMainWindow):
         # Library overlay
         self.library = LibraryWidget(config, history, parent=self)
         self.library.hide()
-        self.library.open_book.connect(self.reader.load_document)
+        self.library.open_book.connect(self._open_book_from_library)
+
+    def _open_book_from_library(self, filepath: str):
+        """Open a book from the library — wait one event loop tick after library
+        hides so self.width() reflects the actual window size before zoom calc."""
+        self.library.hide()
+        self.reader.setFocus()
+        QTimer.singleShot(0, lambda: self.reader.load_document(filepath))
 
         # Gamepad
         self.gamepad = GamepadManager(self, config)
@@ -6864,8 +6878,7 @@ class MainWindow(QMainWindow):
             if last and os.path.exists(last): load_path = last
 
         if load_path:
-            path = load_path
-            QTimer.singleShot(350, lambda: self.reader.load_document(path))
+            self.reader._pending_initial_load = load_path
 
     def _vu_tick(self):
         r = self.reader
