@@ -325,7 +325,7 @@ DEFAULT_CONFIG = {
     "ui_border_width":       2,
     "ui_font_offset":        10,
     "current_swatch":        "amber",
-    "current_font_idx":      0,
+    "current_font_idx":      -1,             # -1 = not set, resolved to IBM PS-55 at startup
     "preload_inverted":      True,
     "start_fullscreen":      True,
     "top_bar_h":             30,
@@ -1294,7 +1294,7 @@ class WizardOverlay:
         elif typ == "font":
             fonts = _scan_fonts()
             if fonts:
-                fidx = int(cur or 0)
+                fidx = int(cur) if cur is not None and int(cur if cur is not None else -1) >= 0 else 0
                 fidx = (fidx + direction) % len(fonts)
                 fam  = _load_font_by_path(fonts[fidx])
                 _UI_FONT_FAMILY_ref[0] = fam
@@ -3469,6 +3469,7 @@ class ReaderWidget(QWidget):
         fonts = _scan_fonts()
         if not fonts: return
         idx = int(self.config.get("current_font_idx") or 0)
+        if idx < 0: idx = 0
         idx = (idx + direction) % len(fonts)
         fam = _load_font_by_path(fonts[idx])
         _UI_FONT_FAMILY_ref[0] = fam
@@ -6916,24 +6917,13 @@ def main():
     _apply_swatch(swatch, config)
     _apply_theme(config)
     _UI_FONT_OFFSET_ref[0] = int(config.get("ui_font_offset") if config.get("ui_font_offset") is not None else 10)
-    # Load saved font — default to IBM PS-55 if no preference saved
+    # Load font — -1 means "not yet chosen by user", default to IBM PS-55
     fonts = _scan_fonts()
-    # Check if user has explicitly saved a font preference
-    saved_config_data = {}
-    if CONFIG_PATH.exists():
-        try:
-            with open(CONFIG_PATH) as _f:
-                saved_config_data = json.load(_f)
-        except Exception:
-            pass
-    if "current_font_idx" in saved_config_data:
-        fidx = int(saved_config_data["current_font_idx"])
-    else:
-        # No saved preference — find IBM PS-55 by filename
+    fidx  = int(config.get("current_font_idx") if config.get("current_font_idx") is not None else -1)
+    if fidx < 0:
         fidx = 0
         for i, path in enumerate(fonts):
-            name = os.path.basename(path).lower()
-            if "px437_ibm_ps-55" in name or "px437_ibm_ps55" in name:
+            if "px437_ibm_ps-55" in os.path.basename(path).lower():
                 fidx = i
                 break
     if fonts and fidx < len(fonts):
