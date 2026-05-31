@@ -815,8 +815,11 @@ class PDFDocument:
         cy = 0
         for pn, page in enumerate(self.doc):
             r   = page.rect
-            w   = int(r.width  * self.zoom)
-            h   = int(r.height * self.zoom)
+            # Use exact fitz pixel dimensions (same matrix as render_page)
+            mat = fitz.Matrix(self.zoom, self.zoom)
+            prect = r * mat
+            w   = int(prect.width)
+            h   = int(prect.height)
             self.page_sizes.append((w, h))
             self.page_offsets.append(cy)
             self.page_pixmaps.append(None)
@@ -2070,9 +2073,7 @@ class ReaderWidget(QWidget):
 
         # ── Pages ─────────────────────────────────────────────────────────
         inv = _pdf_invert_ref[0]
-        # Disable smooth scaling — PDF pixmaps are pre-rendered at exact size
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
-        # Scale painter to physical pixels so pixmaps land on exact pixel boundaries
         dpr = self.devicePixelRatioF()
         if dpr != 1.0:
             painter.save()
@@ -2082,15 +2083,19 @@ class ReaderWidget(QWidget):
                 pw, ph = self.document.page_sizes[i]
                 if py + ph >= vp.y() and py <= vp.bottom():
                     pm = self.document.get_pixmap(i, inverted=inv)
+                    # Draw at exact pixmap dimensions — no scaling, no blur
                     painter.drawPixmap(int(px * dpr), int(py * dpr),
-                                       int(pw * dpr), int(ph * dpr), pm)
+                                       pm.width(), pm.height(), pm)
             painter.restore()
         else:
             for i in range(self.document.page_count):
                 py = vp.y() + self.document.page_offsets[i] - scroll
                 pw, ph = self.document.page_sizes[i]
                 if py + ph >= vp.y() and py <= vp.bottom():
-                    painter.drawPixmap(int(px), int(py), self.document.get_pixmap(i, inverted=inv))
+                    pm = self.document.get_pixmap(i, inverted=inv)
+                    # Draw at exact pixmap dimensions — no scaling, no blur
+                    painter.drawPixmap(int(px), int(py),
+                                       pm.width(), pm.height(), pm)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
         # ── Saved highlights (on PDF) ──────────────────────────────────────
