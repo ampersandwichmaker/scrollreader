@@ -323,13 +323,13 @@ DEFAULT_CONFIG = {
     "theme_bg":              "#000000",
     "margin_side":           "right",
     "ui_border_width":       2,
-    "ui_font_offset":        0,
+    "ui_font_offset":        10,
     "current_swatch":        "amber",
     "current_font_idx":      0,
     "preload_inverted":      True,
     "start_fullscreen":      True,
-    "top_bar_h":             28,
-    "bottom_bar_h":          28,
+    "top_bar_h":             30,
+    "bottom_bar_h":          30,
     "panel_w":               160,
     "reference_dir":         None,
     "cache_window":          12,
@@ -343,8 +343,8 @@ DEFAULT_CONFIG = {
     "max_cache_mb":          0,             # RAM cap in MB (0 = use page count only)
     "translate_provider":    "anthropic",   # anthropic | google | google_official | openai | ollama
     "translate_api_key":     "",            # API key for anthropic/google_official/openai
-    "translate_target_lang": "",            # e.g. "es", "fr", "de" — empty = prompt to set
-    "ui_language":           "",            # preferred reading/UI language — auto-populates translate_target_lang
+    "translate_target_lang": "es",          # default translation target language
+    "ui_language":           "english",     # preferred UI/reading language
     "translate_ollama_host": "http://localhost:11434",
     "translate_ollama_model":"qwen3:8b",
     # AI model tiers — fast=translation, default=extrapolate, powerful=cultural context
@@ -1205,8 +1205,16 @@ class WizardOverlay:
     """Paints a bottom-strip config wizard over the reader. All changes apply live."""
 
     APP_STEPS = [
-        # (config_key, label, type, choices_or_None, min, max, step)
-        ("ui_language",       "UI language (e.g. fr, ja, de)", "text", None, 0, 0, 0),
+        # ── Language & AI ──────────────────────────────────────────────────
+        ("ui_language",       "UI language",           "text",    None,           0,   0,   0),
+        ("translate_target_lang","Translate language (e.g. fr, ja, de)", "text", None, 0, 0, 0),
+        ("translate_provider","Translate provider",    "choice",
+            ["anthropic","google","google_official","openai","ollama"], 0, 0, 1),
+        ("translate_api_key", "API key",               "text",    None,           0,   0,   0),
+        ("ai_model_fast",     "AI model: fast (translation)",  "text", None,      0,   0,   0),
+        ("ai_model_default",  "AI model: default (extrapolate)","text",None,      0,   0,   0),
+        ("ai_model_powerful", "AI model: powerful (cultural context)","text",None,0,   0,   0),
+        # ── Appearance ────────────────────────────────────────────────────
         ("current_swatch",    "Colour swatch",        "swatch",  None,           0,   0,   1),
         ("current_font_idx",  "UI font",               "font",    None,           0,   0,   1),
         ("ui_font_offset",    "Font size offset",      "int",     None,          -5,  15,   1),
@@ -1215,14 +1223,8 @@ class WizardOverlay:
         ("panel_w",           "Panel width",           "int",     None,          80, 400,   5),
         ("ui_border_width",   "Border thickness",      "int",     None,           1,  10,   1),
         ("margin_side",       "Margin side",           "choice",  ["right","left"],0,  0,   1),
+        # ── Library & Cache ───────────────────────────────────────────────
         ("library_dir",       "Library folder",        "path",    None,           0,   0,   0),
-        ("translate_provider","Translate provider",    "choice",
-            ["anthropic","google","google_official","openai","ollama"], 0, 0, 1),
-        ("translate_api_key", "API key",               "text",    None,           0,   0,   0),
-        ("translate_target_lang","Translate language (e.g. fr, ja, de)", "text", None, 0, 0, 0),
-        ("ai_model_fast",     "AI model: fast (translation)",  "text", None,      0,   0,   0),
-        ("ai_model_default",  "AI model: default (extrapolate)","text",None,      0,   0,   0),
-        ("ai_model_powerful", "AI model: powerful (cultural context)","text",None,0,   0,   0),
         ("max_cached_pages",  "Max cached pages (0=unlimited)", "int", None,      0, 2000, 50),
         ("max_cache_mb",      "Max cache RAM MB (0=use page limit)", "int", None, 0, 32768, 256),
     ]
@@ -1326,12 +1328,6 @@ class WizardOverlay:
                 self.reader.history._save()
         else:
             self.reader.config.set(key, val)
-            # Sync translate_target_lang when ui_language changes
-            if key == "ui_language" and val:
-                old_tl = self.reader.config.get("translate_target_lang") or ""
-                old_ul = self.reader.config.get("ui_language") or ""
-                if not old_tl or old_tl == old_ul:
-                    self.reader.config.set("translate_target_lang", val)
             # Apply dimension globals immediately
             global TOP_BAR_H, BOTTOM_BAR_H, PANEL_W
             if key == "top_bar_h":      TOP_BAR_H    = int(val)
@@ -1459,11 +1455,17 @@ class WizardOverlay:
                     painter.drawText(vx + vw - PAD - 6, row_y + ROW_H - 8, "\u203a")
                     painter.setPen(AMBER_BRIGHT)
                 elif selected and typ in ("text", "path"):
-                    enter_hint = "  [Enter to edit]"
-                    painter.setPen(AMBER_DIM)
+                    # [Enter to edit] hint: positioned right of the label, left of value
+                    enter_hint = "[Enter to edit]"
+                    lw = QFontMetrics(font_b).horizontalAdvance(display_label)
+                    hint_x = vx + PAD + lw + 8
+                    # Clamp so it doesn't overlap the value
+                    val_w = QFontMetrics(_ui_font(10, bold=True)).horizontalAdvance(val_str)
+                    max_hint_x = vx + vw - val_w - QFontMetrics(font_s).horizontalAdvance(enter_hint) - PAD - 8
+                    hint_x = min(hint_x, max_hint_x)
+                    painter.setPen(AMBER_DARK)
                     painter.setFont(font_s)
-                    painter.drawText(vx + vw - QFontMetrics(font_s).horizontalAdvance(enter_hint) - PAD,
-                                     row_y + ROW_H - 8, enter_hint)
+                    painter.drawText(hint_x, row_y + ROW_H - 8, enter_hint)
                     painter.setFont(_ui_font(10, bold=True))
                     painter.setPen(AMBER_BRIGHT)
                 painter.drawText(val_x, row_y + ROW_H - 8, val_str)
@@ -1555,8 +1557,13 @@ class WizardOverlay:
         if typ == "bool":     return "ON" if cur else "OFF"
         if typ == "color":    return str(cur or "#ffb000")
         if typ == "choice":   return str(cur or (choices[0] if choices else ""))
-        if typ == "text":     return str(cur or "(not set)")
-        if typ == "path":     return str(cur or "(not set)")
+        if typ in ("text", "path"):
+            s = str(cur or "")
+            if not s: return "(not set)"
+            # Mask API keys — show first 4 + *** + last 4
+            if key == "translate_api_key" and len(s) > 8:
+                return s[:4] + "·" * min(12, len(s) - 8) + s[-4:]
+            return s
         return str(cur or "")
 
 
@@ -3615,76 +3622,112 @@ class ReaderWidget(QWidget):
             self._paint_audio_vu(painter)
 
     def _paint_full_bar(self, painter: QPainter, render_frac: float, inv_frac: float):
-        """Full-margin progress bar with animated labels. Normal fills bottom→up,
-        invert fills top→down. Each bar has rotated marquee text while active."""
+        """Full-margin progress bar. Normal fills bottom→up, invert fills top→down.
+        Text is anchored to margin edges, color inverts per-pixel via clip rects."""
         mr      = self._margin_rect()
-        track_x = mr.left() + 2
-        track_w = mr.width() - 4
+        track_x = mr.left()
+        track_w = mr.width()
         track_y = mr.top()
         track_h = mr.height()
         ind     = QColor(self._cfg("indicator_color") or "#ffb000")
         frame   = self._bar_anim_frame
 
-        # Detect document type for label
-        fp = self.document.filepath if self.document else ""
-        ext = os.path.splitext(fp)[1].lower()
+        fp       = self.document.filepath if self.document else ""
+        ext      = os.path.splitext(fp)[1].lower()
         doc_type = {".epub":"EBOOK",".mobi":"EBOOK",".cbz":"EBOOK",".fb2":"EBOOK"}.get(ext, "PDF")
 
-        # Marquee: 8-frame cycle of >> marching across
         MARQUEE = [">      ", " >     ", "  >    ", "   >   ",
                    "    >  ", "     > ", "      >", ">>>>>>>"]
         mq = MARQUEE[frame % 8]
 
-        # ── Normal render bar (fills bottom → top) ────────────────────────
+        # Which phase is active
+        render_active = render_frac < 1.0
+        inv_active    = inv_frac > 0.0 and inv_frac < 1.0
+
+        font = _ui_font(14, bold=True)
+        fm   = QFontMetrics(font)
+        OFFSET = 5   # px inset from margin edges
+
+        # Text colors: fg = readable on margin bg, inv = readable on fill
+        col_fg  = AMBER_BRIGHT
+        col_inv = UI_BG if ind.lightness() > 60 else AMBER_BRIGHT
+
+        # ── Normal render bar (fills bottom → up) ─────────────────────────
         fill_h = int(track_h * render_frac)
         if fill_h > 0:
-            fill_y = track_y + track_h - fill_h
             c = QColor(ind); c.setAlpha(90)
+            fill_y = track_y + track_h - fill_h
             painter.fillRect(QRect(track_x, fill_y, track_w, fill_h), c)
 
-            # Rotated label inside the filled portion: reads bottom-to-top (head tilted left)
-            # Only draw if bar is tall enough to show text
-            if fill_h > 20:
-                label = f"{mq} LOADING {doc_type}"
-                font  = _ui_font(8, bold=True)
-                fm    = QFontMetrics(font)
-                tw    = fm.horizontalAdvance(label)
-                # Text fits within the filled height
-                text_x = track_x + track_w // 2
-                text_y = min(track_y + track_h - 4,
-                             fill_y + fill_h - 4)  # bottom of fill
-                text_y = max(fill_y + tw + 2, text_y)
-
-                painter.save()
-                painter.setFont(font)
-                # Inverted colors so text is readable against the fill
-                painter.setPen(QColor(0, 0, 0) if ind.lightness() > 100 else AMBER_BRIGHT)
-                painter.translate(text_x, text_y)
-                painter.rotate(-90)   # bottom-to-top: head tilted left
-                painter.drawText(0, 0, label)
-                painter.restore()
-
-        # ── Invert bar (fills top → down) ─────────────────────────────────
+        # ── Invert bar (fills top → down) ──────────────────────────────────
         inv_fill_h = int(track_h * inv_frac)
         if inv_fill_h > 0:
             c2 = QColor(ind); c2.setAlpha(50)
             painter.fillRect(QRect(track_x, track_y, track_w, inv_fill_h), c2)
 
-            if inv_fill_h > 20:
-                label2 = f"LOADING INVERT {doc_type} {mq}"
-                font   = _ui_font(8, bold=True)
-                fm     = QFontMetrics(font)
-                tw     = fm.horizontalAdvance(label2)
-                text_x = track_x + track_w // 2
-                text_y = max(track_y + 4,
-                             track_y + inv_fill_h - tw - 2)
-                text_y = min(track_y + inv_fill_h - 4, text_y + tw)
+        # ── Normal bar label ───────────────────────────────────────────────
+        # rotate(-90): text reads bottom-to-top
+        # left of text aligns with margin bottom, top of text at margin left
+        # anchor: translate(mr.left() + fm.ascent() + OFFSET, mr.bottom() - OFFSET)
+        if render_active:
+            label = f"{mq} LOADING {doc_type}"
+            ax    = mr.left()  + fm.ascent() + OFFSET
+            ay    = mr.bottom() - OFFSET
 
+            # Fill rect in document coords (before rotation): the filled region
+            # maps to y range [fill_y, mr.bottom()] which after rotate(-90) at anchor
+            # becomes x range [mr.bottom()-fill_h .. mr.bottom()] → in rotated space
+            # the covered portion is the last fill_h px of the text string (from end)
+            # Clip rect for covered portion (in widget space): the fill occupies
+            # y in [fill_y, mr.bottom()], x in [mr.left(), mr.right()]
+            fill_y = mr.top() + track_h - fill_h
+
+            # 1. Draw full label in fg color (no clip)
+            painter.save()
+            painter.setFont(font)
+            painter.setPen(col_fg)
+            painter.translate(ax, ay)
+            painter.rotate(-90)
+            painter.drawText(0, 0, label)
+            painter.restore()
+
+            # 2. Clip to the fill region, redraw in inv color
+            if fill_h > 0:
                 painter.save()
+                painter.setClipRect(QRect(mr.left(), fill_y, mr.width(), fill_h))
                 painter.setFont(font)
-                painter.setPen(QColor(0, 0, 0) if ind.lightness() > 100 else AMBER_BRIGHT)
-                painter.translate(text_x, track_y + 4)
-                painter.rotate(90)    # top-to-bottom: head tilted right
+                painter.setPen(col_inv)
+                painter.translate(ax, ay)
+                painter.rotate(-90)
+                painter.drawText(0, 0, label)
+                painter.restore()
+
+        # ── Invert bar label ───────────────────────────────────────────────
+        # rotate(+90): text reads top-to-bottom
+        # left of text aligns with margin top, top of text at margin right
+        # anchor: translate(mr.right() - fm.ascent() - OFFSET, mr.top() + OFFSET)
+        if inv_active:
+            label2 = f"LOADING INVERT {doc_type} {mq}"
+            ax2    = mr.right() - fm.ascent() - OFFSET
+            ay2    = mr.top()   + OFFSET
+
+            # 1. Draw full label in fg color
+            painter.save()
+            painter.setFont(font)
+            painter.setPen(col_fg)
+            painter.translate(ax2, ay2)
+            painter.rotate(90)
+            painter.drawText(0, 0, label2)
+            painter.restore()
+
+            # 2. Clip to invert fill region, redraw in inv color
+            if inv_fill_h > 0:
+                painter.save()
+                painter.setClipRect(QRect(mr.left(), mr.top(), mr.width(), inv_fill_h))
+                painter.setFont(font)
+                painter.setPen(col_inv)
+                painter.translate(ax2, ay2)
+                painter.rotate(90)
                 painter.drawText(0, 0, label2)
                 painter.restore()
 
@@ -6836,6 +6879,13 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    # HiDPI: let Qt handle scaling automatically; disable fractional rounding
+    # that causes blurry rendering on high-DPI displays (common on CAD laptops)
+    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING",   "1")
+    from PyQt6.QtCore import Qt as _Qt
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        _Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app     = QApplication(sys.argv)
     app.setApplicationName("ScrollReader")
     _load_vga_font()
@@ -6856,7 +6906,7 @@ def main():
     swatch = config.get("current_swatch") or "amber"
     _apply_swatch(swatch, config)
     _apply_theme(config)
-    _UI_FONT_OFFSET_ref[0] = int(config.get("ui_font_offset") or 0)
+    _UI_FONT_OFFSET_ref[0] = int(config.get("ui_font_offset") if config.get("ui_font_offset") is not None else 10)
     # Load saved font
     fonts = _scan_fonts()
     fidx  = int(config.get("current_font_idx") or 0)
