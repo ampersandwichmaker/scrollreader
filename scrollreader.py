@@ -1740,13 +1740,6 @@ class ReaderWidget(QWidget):
             }}
         """)
 
-    def showEvent(self, ev):
-        super().showEvent(ev)
-        path = getattr(self, '_pending_initial_load', None)
-        if path:
-            self._pending_initial_load = None
-            QTimer.singleShot(0, lambda: self.load_document(path))
-
     def resizeEvent(self, ev):
         self.cmd.setGeometry(0, self.height()-BOTTOM_BAR_H, self.width(), BOTTOM_BAR_H)
         # Show dimensions while resizing
@@ -1949,12 +1942,17 @@ class ReaderWidget(QWidget):
 
     # ---------------------------------------------------------------- zoom
 
+    def _fit_width_zoom(self, nw: float) -> float:
+        """Zoom for fit-width: use full app width so the page fills the screen
+        regardless of when the window was maximized. Cached at load time."""
+        uw = max(self.width(), 800) - 40   # fall back to 800 if not yet sized
+        return max(0.1, uw / nw)
+
     def _compute_zoom_for_doc(self, mode: str, doc: 'PDFDocument') -> float:
         nw, nh = doc.natural_width, doc.natural_height
         vp = self._vp()
-        uw = vp.width()  - 40
         uh = vp.height() - 40
-        if mode == "fit-width": return max(0.1, uw / nw)
+        if mode == "fit-width": return self._fit_width_zoom(nw)
         if mode == "fit-page":  return max(0.1, uh / nh)
         if mode == "50%":  return 0.75
         if mode == "75%":  return 1.1
@@ -1970,10 +1968,9 @@ class ReaderWidget(QWidget):
                 d = fitz.open(peek_path); r = d[0].rect; nw, nh = r.width, r.height; d.close()
             except Exception: pass
         vp = self._vp()
-        uw = vp.width()  - 40
         uh = vp.height() - 40
-        if mode == "fit-width": return max(0.1, uw/nw)
-        if mode == "fit-page":  return max(0.1, uh/nh)
+        if mode == "fit-width": return self._fit_width_zoom(nw)
+        if mode == "fit-page":  return max(0.1, uh / nh)
         if mode == "50%":  return 0.75
         if mode == "75%":  return 1.1
         if mode == "100%": return 1.5
@@ -2036,9 +2033,18 @@ class ReaderWidget(QWidget):
         return vp.y() + int(self.document.lines[self.current_line].abs_y - self._scroll_offset())
 
     def _page_x_offset(self):
-        if not self.document: return L_MARGIN
-        vp = self._vp()
-        return vp.x() + max(0, (vp.width() - self.document.max_width) // 2)
+        if not self.document: return 0
+        side      = self._margin_side()
+        # Non-margin area: from 0 to (w - PANEL_W) for right margin,
+        # or from PANEL_W to w for left margin
+        if side == "left":
+            area_x = PANEL_W
+            area_w = self.width() - PANEL_W
+        else:
+            area_x = 0
+            area_w = self.width() - PANEL_W
+        # Center the page within that area
+        return area_x + max(0, (area_w - self.document.max_width) // 2)
 
     def _lines_per_screen(self):
         if not self.document or not self.document.lines: return 10
@@ -6850,7 +6856,7 @@ class MainWindow(QMainWindow):
         # Library overlay
         self.library = LibraryWidget(config, history, parent=self)
         self.library.hide()
-        self.library.open_book.connect(self._open_book_from_library)
+        self.library.open_book.connect(self.reader.load_document)
 
         # Gamepad
         self.gamepad = GamepadManager(self, config)
@@ -6871,14 +6877,8 @@ class MainWindow(QMainWindow):
             if last and os.path.exists(last): load_path = last
 
         if load_path:
-            self.reader._pending_initial_load = load_path
-
-    def _open_book_from_library(self, filepath: str):
-        """Open a book from the library — wait one event loop tick after library
-        hides so self.width() reflects the actual window size before zoom calc."""
-        self.library.hide()
-        self.reader.setFocus()
-        QTimer.singleShot(0, lambda: self.reader.load_document(filepath))
+            path = load_path
+            QTimer.singleShot(100, lambda: self.reader.load_document(path))
 
     def _vu_tick(self):
         r = self.reader
