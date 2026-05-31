@@ -1943,11 +1943,11 @@ class ReaderWidget(QWidget):
     # ---------------------------------------------------------------- zoom
 
     def _fit_width_zoom(self, nw: float) -> float:
-        """Zoom for fit-width using actual screen width — reliable regardless
-        of when load_document is called relative to window maximization."""
+        """Zoom for fit-width using screen's available geometry in logical pixels —
+        matches self.width() when maximized, but available at document load time."""
         from PyQt6.QtWidgets import QApplication as _QApp
         screen = _QApp.primaryScreen()
-        sw = screen.size().width() if screen else 1920
+        sw = screen.availableGeometry().width() if screen else 1920
         uw = sw - 40
         return max(0.1, uw / nw)
 
