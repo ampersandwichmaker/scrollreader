@@ -1943,9 +1943,12 @@ class ReaderWidget(QWidget):
     # ---------------------------------------------------------------- zoom
 
     def _fit_width_zoom(self, nw: float) -> float:
-        """Zoom for fit-width: use full app width so the page fills the screen
-        regardless of when the window was maximized. Cached at load time."""
-        uw = max(self.width(), 800) - 40   # fall back to 800 if not yet sized
+        """Zoom for fit-width using actual screen width — reliable regardless
+        of when load_document is called relative to window maximization."""
+        from PyQt6.QtWidgets import QApplication as _QApp
+        screen = _QApp.primaryScreen()
+        sw = screen.size().width() if screen else 1920
+        uw = sw - 40
         return max(0.1, uw / nw)
 
     def _compute_zoom_for_doc(self, mode: str, doc: 'PDFDocument') -> float:
@@ -3582,16 +3585,6 @@ class ReaderWidget(QWidget):
         QTimer.singleShot(5000, self._clear_status)
         self.update()
 
-    def _open_search_panel(self):
-        """Open the search panel (gamepad R4 or keyboard)."""
-        if not self.document: return
-        self._search_panel_active = True
-        self._search_input_active = False   # always start in nav mode, not typing mode
-        self._search_results      = getattr(self, '_search_results', [])
-        self._search_pre_line     = self.current_line
-        self._search_cursor       = 0
-        self.update()
-
     def _open_config_popup(self, kind: str):
         """Open the 3-row config popup (L3=global, R3=per-book)."""
         self._config_popup_kind  = kind
@@ -3864,12 +3857,6 @@ class ReaderWidget(QWidget):
         # Draw as a dim full-width rect
         c = QColor(AMBER_DIM); c.setAlpha(60)
         painter.fillRect(QRect(track_x, thumb_y, track_w, thumb_h), c)
-
-    def _open_panel(self, title: str, kind: str):
-        """Open a named overlay panel."""
-        self.panel = {"title": title, "kind": kind, "items": []}
-        self._panel_scroll = 0
-        self.update()
 
     def _open_search_panel(self):
         """Open the search panel."""
