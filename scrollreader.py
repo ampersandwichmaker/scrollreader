@@ -835,21 +835,29 @@ class PDFDocument:
         self.total_height = cy
         self.lines.sort(key=lambda l: l.abs_y)
 
-    def render_page(self, pn: int) -> QPixmap:
-        mat = fitz.Matrix(self.zoom, self.zoom)
-        pix = self.doc[pn].get_pixmap(matrix=mat, alpha=False)
-        img = QImage(pix.samples, pix.width, pix.height,
-                     pix.stride, QImage.Format.Format_RGB888)
-        return QPixmap.fromImage(img)
+    def render_page(self, pn: int, dpr: float = 1.0) -> QPixmap:
+        scale = self.zoom * dpr
+        mat   = fitz.Matrix(scale, scale)
+        pix   = self.doc[pn].get_pixmap(matrix=mat, alpha=False)
+        img   = QImage(pix.samples, pix.width, pix.height,
+                       pix.stride, QImage.Format.Format_RGB888)
+        pm = QPixmap.fromImage(img)
+        if dpr != 1.0:
+            pm.setDevicePixelRatio(dpr)
+        return pm
 
-    def render_page_inv(self, pn: int) -> QPixmap:
+    def render_page_inv(self, pn: int, dpr: float = 1.0) -> QPixmap:
         """Render a page with colors inverted."""
-        mat = fitz.Matrix(self.zoom, self.zoom)
-        pix = self.doc[pn].get_pixmap(matrix=mat, alpha=False)
-        pix.invert_irect()   # C-level, very fast
-        img = QImage(pix.samples, pix.width, pix.height,
-                     pix.stride, QImage.Format.Format_RGB888)
-        return QPixmap.fromImage(img)
+        scale = self.zoom * dpr
+        mat   = fitz.Matrix(scale, scale)
+        pix   = self.doc[pn].get_pixmap(matrix=mat, alpha=False)
+        pix.invert_irect()
+        img   = QImage(pix.samples, pix.width, pix.height,
+                       pix.stride, QImage.Format.Format_RGB888)
+        pm = QPixmap.fromImage(img)
+        if dpr != 1.0:
+            pm.setDevicePixelRatio(dpr)
+        return pm
 
     def render_range(self, start: int, end: int, inverted: bool = False):
         start = max(0, start)
@@ -901,13 +909,15 @@ class RenderThread(QThread):
     page_ready_inv = pyqtSignal(int, QPixmap)
 
     def __init__(self, document: PDFDocument, start_page: int,
-                 preload_inv: bool = True, lo: int = 0, hi: int = -1):
+                 preload_inv: bool = True, lo: int = 0, hi: int = -1,
+                 dpr: float = 1.0):
         super().__init__()
         self.document    = document
         self.start_page  = start_page
         self.preload_inv = preload_inv
         self.lo          = lo
         self.hi          = hi if hi >= 0 else document.page_count - 1
+        self.dpr         = dpr
         self._cancel     = False
 
     def cancel(self):
@@ -923,7 +933,7 @@ class RenderThread(QThread):
             if self._cancel: return
             if self.document.page_pixmaps[pn] is None:
                 try:
-                    pm = self.document.render_page(pn)
+                    pm = self.document.render_page(pn, self.dpr)
                     self.document.page_pixmaps[pn] = pm
                     self.page_ready.emit(pn, pm)
                 except Exception:
@@ -934,7 +944,7 @@ class RenderThread(QThread):
                 if self._cancel: return
                 if self.document.page_pixmaps_inv[pn] is None:
                     try:
-                        pm_inv = self.document.render_page_inv(pn)
+                        pm_inv = self.document.render_page_inv(pn, self.dpr)
                         self.document.page_pixmaps_inv[pn] = pm_inv
                         self.page_ready_inv.emit(pn, pm_inv)
                     except Exception:
@@ -1373,18 +1383,23 @@ class WizardOverlay:
         painter.setPen(_mk_pen(AMBER_BRIGHT, 2))
         painter.drawLine(vx, oy, vx + vw, oy)
 
-        # Header row
+        # Header row — give it enough height for the font
+        header_h = QFontMetrics(font_s).height() + 10
         kind_lbl = "APP + BOOK SETTINGS" if self.kind == "combined" else ("APP SETUP" if self.kind == "app" else "BOOK SETUP")
         painter.setPen(AMBER_DARK)
         painter.setFont(font_s)
-        painter.drawText(vx + PAD, oy + 14, kind_lbl)
+        painter.drawText(vx + PAD, oy + header_h - 4, kind_lbl)
         painter.setPen(AMBER_DIM)
         hint = "type to edit   Enter confirm   Esc cancel" if self._text_editing else "\u2190/\u2192 change   Enter/\u2193 next   Esc close"
-        painter.drawText(vx + vw - QFontMetrics(font_s).horizontalAdvance(hint) - PAD, oy + 14, hint)
+        painter.drawText(vx + vw - QFontMetrics(font_s).horizontalAdvance(hint) - PAD, oy + header_h - 4, hint)
+
+        # Separator line under header
+        painter.setPen(_mk_pen(AMBER_DARK, 1))
+        painter.drawLine(vx, oy + header_h, vx + vw, oy + header_h)
 
         # Scrollable list area
-        list_y  = oy + 22
-        list_h  = oh - 22 - 4
+        list_y  = oy + header_h + 2
+        list_h  = oh - header_h - 6
         visible = max(1, list_h // ROW_H)
 
         # Auto-scroll to keep selected item visible
@@ -1841,7 +1856,8 @@ class ReaderWidget(QWidget):
         lo, hi    = self._compute_cache_window(start_page)
         self._cache_lo = lo
         self._cache_hi = hi
-        t = RenderThread(self.document, start_page, preload_inv=preload, lo=lo, hi=hi)
+        dpr = self.devicePixelRatioF()
+        t = RenderThread(self.document, start_page, preload_inv=preload, lo=lo, hi=hi, dpr=dpr)
         t.page_ready.connect(self._on_page_ready)
         t.page_ready_inv.connect(self._on_page_ready_inv)
         t.finished.connect(self._on_render_done)
@@ -3642,13 +3658,12 @@ class ReaderWidget(QWidget):
 
         # Which phase is active
         render_active = render_frac < 1.0
-        inv_active    = inv_frac > 0.0 and inv_frac < 1.0
+        inv_active    = inv_frac > 0.0 and inv_frac < 1.0 and render_frac >= 1.0
 
         font = _ui_font(14, bold=True)
         fm   = QFontMetrics(font)
-        OFFSET = 5   # px inset from margin edges
+        OFFSET = 5
 
-        # Text colors: fg = readable on margin bg, inv = readable on fill
         col_fg  = AMBER_BRIGHT
         col_inv = UI_BG if ind.lightness() > 60 else AMBER_BRIGHT
 
@@ -3665,24 +3680,13 @@ class ReaderWidget(QWidget):
             c2 = QColor(ind); c2.setAlpha(50)
             painter.fillRect(QRect(track_x, track_y, track_w, inv_fill_h), c2)
 
-        # ── Normal bar label ───────────────────────────────────────────────
-        # rotate(-90): text reads bottom-to-top
-        # left of text aligns with margin bottom, top of text at margin left
-        # anchor: translate(mr.left() + fm.ascent() + OFFSET, mr.bottom() - OFFSET)
+        # ── Normal bar label — marquee AFTER text, anchor rounded to int ───
         if render_active:
-            label = f"{mq} LOADING {doc_type}"
-            ax    = mr.left()  + fm.ascent() + OFFSET
-            ay    = mr.bottom() - OFFSET
-
-            # Fill rect in document coords (before rotation): the filled region
-            # maps to y range [fill_y, mr.bottom()] which after rotate(-90) at anchor
-            # becomes x range [mr.bottom()-fill_h .. mr.bottom()] → in rotated space
-            # the covered portion is the last fill_h px of the text string (from end)
-            # Clip rect for covered portion (in widget space): the fill occupies
-            # y in [fill_y, mr.bottom()], x in [mr.left(), mr.right()]
+            label = f"LOADING {doc_type} {mq}"
+            ax    = int(mr.left()   + fm.ascent() + OFFSET)
+            ay    = int(mr.bottom() - OFFSET)
             fill_y = mr.top() + track_h - fill_h
 
-            # 1. Draw full label in fg color (no clip)
             painter.save()
             painter.setFont(font)
             painter.setPen(col_fg)
@@ -3691,7 +3695,6 @@ class ReaderWidget(QWidget):
             painter.drawText(0, 0, label)
             painter.restore()
 
-            # 2. Clip to the fill region, redraw in inv color
             if fill_h > 0:
                 painter.save()
                 painter.setClipRect(QRect(mr.left(), fill_y, mr.width(), fill_h))
@@ -3702,16 +3705,12 @@ class ReaderWidget(QWidget):
                 painter.drawText(0, 0, label)
                 painter.restore()
 
-        # ── Invert bar label ───────────────────────────────────────────────
-        # rotate(+90): text reads top-to-bottom
-        # left of text aligns with margin top, top of text at margin right
-        # anchor: translate(mr.right() - fm.ascent() - OFFSET, mr.top() + OFFSET)
+        # ── Invert bar label — only shown once render is complete ──────────
         if inv_active:
             label2 = f"LOADING INVERT {doc_type} {mq}"
-            ax2    = mr.right() - fm.ascent() - OFFSET
-            ay2    = mr.top()   + OFFSET
+            ax2    = int(mr.right()  - fm.ascent() - OFFSET)
+            ay2    = int(mr.top()    + OFFSET)
 
-            # 1. Draw full label in fg color
             painter.save()
             painter.setFont(font)
             painter.setPen(col_fg)
@@ -3720,7 +3719,6 @@ class ReaderWidget(QWidget):
             painter.drawText(0, 0, label2)
             painter.restore()
 
-            # 2. Clip to invert fill region, redraw in inv color
             if inv_fill_h > 0:
                 painter.save()
                 painter.setClipRect(QRect(mr.left(), mr.top(), mr.width(), inv_fill_h))
