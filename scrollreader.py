@@ -836,28 +836,20 @@ class PDFDocument:
         self.lines.sort(key=lambda l: l.abs_y)
 
     def render_page(self, pn: int, dpr: float = 1.0) -> QPixmap:
-        scale = self.zoom * dpr
-        mat   = fitz.Matrix(scale, scale)
-        pix   = self.doc[pn].get_pixmap(matrix=mat, alpha=False)
-        img   = QImage(pix.samples, pix.width, pix.height,
-                       pix.stride, QImage.Format.Format_RGB888)
-        pm = QPixmap.fromImage(img)
-        if dpr != 1.0:
-            pm.setDevicePixelRatio(dpr)
-        return pm
+        mat = fitz.Matrix(self.zoom, self.zoom)
+        pix = self.doc[pn].get_pixmap(matrix=mat, alpha=False)
+        img = QImage(pix.samples, pix.width, pix.height,
+                     pix.stride, QImage.Format.Format_RGB888)
+        return QPixmap.fromImage(img)
 
     def render_page_inv(self, pn: int, dpr: float = 1.0) -> QPixmap:
         """Render a page with colors inverted."""
-        scale = self.zoom * dpr
-        mat   = fitz.Matrix(scale, scale)
-        pix   = self.doc[pn].get_pixmap(matrix=mat, alpha=False)
+        mat = fitz.Matrix(self.zoom, self.zoom)
+        pix = self.doc[pn].get_pixmap(matrix=mat, alpha=False)
         pix.invert_irect()
-        img   = QImage(pix.samples, pix.width, pix.height,
-                       pix.stride, QImage.Format.Format_RGB888)
-        pm = QPixmap.fromImage(img)
-        if dpr != 1.0:
-            pm.setDevicePixelRatio(dpr)
-        return pm
+        img = QImage(pix.samples, pix.width, pix.height,
+                     pix.stride, QImage.Format.Format_RGB888)
+        return QPixmap.fromImage(img)
 
     def render_range(self, start: int, end: int, inverted: bool = False):
         start = max(0, start)
@@ -2078,14 +2070,27 @@ class ReaderWidget(QWidget):
 
         # ── Pages ─────────────────────────────────────────────────────────
         inv = _pdf_invert_ref[0]
-        # Disable smooth scaling — PDF pixmaps are pre-rendered at correct DPI,
-        # bilinear filtering just blurs them
+        # Disable smooth scaling — PDF pixmaps are pre-rendered at exact size
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
-        for i in range(self.document.page_count):
-            py = vp.y() + self.document.page_offsets[i] - scroll
-            pw, ph = self.document.page_sizes[i]
-            if py + ph >= vp.y() and py <= vp.bottom():
-                painter.drawPixmap(int(px), int(py), self.document.get_pixmap(i, inverted=inv))
+        # Scale painter to physical pixels so pixmaps land on exact pixel boundaries
+        dpr = self.devicePixelRatioF()
+        if dpr != 1.0:
+            painter.save()
+            painter.scale(1.0 / dpr, 1.0 / dpr)
+            for i in range(self.document.page_count):
+                py = vp.y() + self.document.page_offsets[i] - scroll
+                pw, ph = self.document.page_sizes[i]
+                if py + ph >= vp.y() and py <= vp.bottom():
+                    pm = self.document.get_pixmap(i, inverted=inv)
+                    painter.drawPixmap(int(px * dpr), int(py * dpr),
+                                       int(pw * dpr), int(ph * dpr), pm)
+            painter.restore()
+        else:
+            for i in range(self.document.page_count):
+                py = vp.y() + self.document.page_offsets[i] - scroll
+                pw, ph = self.document.page_sizes[i]
+                if py + ph >= vp.y() and py <= vp.bottom():
+                    painter.drawPixmap(int(px), int(py), self.document.get_pixmap(i, inverted=inv))
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
         # ── Saved highlights (on PDF) ──────────────────────────────────────
@@ -6913,11 +6918,18 @@ def main():
     _UI_FONT_OFFSET_ref[0] = int(config.get("ui_font_offset") if config.get("ui_font_offset") is not None else 10)
     # Load saved font — default to IBM PS-55 if no preference saved
     fonts = _scan_fonts()
-    saved_idx = config.get("current_font_idx")
-    if saved_idx is not None:
-        fidx = int(saved_idx)
+    # Check if user has explicitly saved a font preference
+    saved_config_data = {}
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH) as _f:
+                saved_config_data = json.load(_f)
+        except Exception:
+            pass
+    if "current_font_idx" in saved_config_data:
+        fidx = int(saved_config_data["current_font_idx"])
     else:
-        # Find IBM PS-55 by filename
+        # No saved preference — find IBM PS-55 by filename
         fidx = 0
         for i, path in enumerate(fonts):
             name = os.path.basename(path).lower()
