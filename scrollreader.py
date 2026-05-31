@@ -6852,20 +6852,13 @@ class MainWindow(QMainWindow):
         self.library.hide()
         self.library.open_book.connect(self._open_book_from_library)
 
-    def _open_book_from_library(self, filepath: str):
-        """Open a book from the library — wait one event loop tick after library
-        hides so self.width() reflects the actual window size before zoom calc."""
-        self.library.hide()
-        self.reader.setFocus()
-        QTimer.singleShot(0, lambda: self.reader.load_document(filepath))
-
         # Gamepad
         self.gamepad = GamepadManager(self, config)
-        self.reader.gamepad_ref = self.gamepad   # for HL overlay
+        self.reader.gamepad_ref = self.gamepad
         if HAS_PYGAME:
             self._gp_timer = QTimer(self)
             self._gp_timer.timeout.connect(self.gamepad.poll)
-            self._gp_timer.start(16)   # ~60Hz
+            self._gp_timer.start(16)
 
         # VU meter refresh during recording
         self._vu_timer = QTimer(self)
@@ -6879,6 +6872,13 @@ class MainWindow(QMainWindow):
 
         if load_path:
             self.reader._pending_initial_load = load_path
+
+    def _open_book_from_library(self, filepath: str):
+        """Open a book from the library — wait one event loop tick after library
+        hides so self.width() reflects the actual window size before zoom calc."""
+        self.library.hide()
+        self.reader.setFocus()
+        QTimer.singleShot(0, lambda: self.reader.load_document(filepath))
 
     def _vu_tick(self):
         r = self.reader
