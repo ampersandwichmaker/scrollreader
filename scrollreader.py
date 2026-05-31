@@ -1817,6 +1817,8 @@ class ReaderWidget(QWidget):
             self.current_line = min(self.history.get_line(filepath), max(0, len(doc.lines)-1))
             self.panel        = None
             self._pending     = None
+            # Debug: show zoom and screen width used
+            self.status_text = f"zoom={doc.zoom:.3f} sw={_SCREEN_WIDTH_ref[0]} pw={doc.max_width}"
 
             # Restore per-book invert state
             _pdf_invert_ref[0] = bool(
