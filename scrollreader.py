@@ -2078,11 +2078,15 @@ class ReaderWidget(QWidget):
 
         # ── Pages ─────────────────────────────────────────────────────────
         inv = _pdf_invert_ref[0]
+        # Disable smooth scaling — PDF pixmaps are pre-rendered at correct DPI,
+        # bilinear filtering just blurs them
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
         for i in range(self.document.page_count):
             py = vp.y() + self.document.page_offsets[i] - scroll
             pw, ph = self.document.page_sizes[i]
             if py + ph >= vp.y() and py <= vp.bottom():
-                painter.drawPixmap(px, int(py), self.document.get_pixmap(i, inverted=inv))
+                painter.drawPixmap(int(px), int(py), self.document.get_pixmap(i, inverted=inv))
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
         # ── Saved highlights (on PDF) ──────────────────────────────────────
         sh_col = QColor(self._cfg("saved_highlight_color") or AMBER.name())
@@ -6907,9 +6911,19 @@ def main():
     _apply_swatch(swatch, config)
     _apply_theme(config)
     _UI_FONT_OFFSET_ref[0] = int(config.get("ui_font_offset") if config.get("ui_font_offset") is not None else 10)
-    # Load saved font
+    # Load saved font — default to IBM PS-55 if no preference saved
     fonts = _scan_fonts()
-    fidx  = int(config.get("current_font_idx") or 0)
+    saved_idx = config.get("current_font_idx")
+    if saved_idx is not None:
+        fidx = int(saved_idx)
+    else:
+        # Find IBM PS-55 by filename
+        fidx = 0
+        for i, path in enumerate(fonts):
+            name = os.path.basename(path).lower()
+            if "px437_ibm_ps-55" in name or "px437_ibm_ps55" in name:
+                fidx = i
+                break
     if fonts and fidx < len(fonts):
         _UI_FONT_FAMILY_ref[0] = _load_font_by_path(fonts[fidx]) or _UI_FONT_FAMILY_ref[0]
     history = History()
