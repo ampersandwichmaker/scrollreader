@@ -1246,6 +1246,7 @@ class WizardOverlay:
         ("margin_side",       "Margin side",           "choice",  ["right","left"],0,  0,   1),
         ("zoom_mode",         "Zoom mode",             "choice",
             ["fit-width","fit-page","50%","75%","100%","110%","120%"], 0, 0, 1),
+        ("__zoomdebug__",     "zoom info",             "debug",   None,           0,   0,   0),
         # ── Actions ───────────────────────────────────────────────────────
         ("__revert__",        "Revert to defaults",    "action",  None,           0,   0,   0),
         ("__exit__",          "Exit settings",         "action",  None,           0,   0,   0),
@@ -1278,7 +1279,7 @@ class WizardOverlay:
         return self.steps[self.idx]
 
     def _is_divider(self, idx: int) -> bool:
-        return self.steps[idx][2] == "divider"
+        return self.steps[idx][2] in ("divider", "debug")
 
     def _nav(self, direction: int):
         """Move idx by direction, skipping any divider rows."""
@@ -1434,6 +1435,20 @@ class WizardOverlay:
                 painter.drawText(vx + PAD, row_y + ROW_H - 7, label)
                 painter.setPen(_mk_pen(AMBER_DARK, 1))
                 painter.drawLine(vx, row_y + ROW_H - 1, vx + vw, row_y + ROW_H - 1)
+                continue
+
+            # Debug info row — non-selectable, dimmed
+            if typ == "debug":
+                doc  = self.reader.document
+                if doc:
+                    dbg = (f"zoom={doc.zoom:.3f}  sw={_SCREEN_WIDTH_ref[0]}"
+                           f"  pw={doc.max_width}  vw={self.reader.width()}"
+                           f"  panelw={PANEL_W}")
+                else:
+                    dbg = f"sw={_SCREEN_WIDTH_ref[0]}  vw={self.reader.width()}  panelw={PANEL_W}"
+                painter.setFont(font_s)
+                painter.setPen(AMBER_DARK)
+                painter.drawText(vx + PAD, row_y + ROW_H - 8, dbg)
                 continue
 
             # Action row (revert / exit)
