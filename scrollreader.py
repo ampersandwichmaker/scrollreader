@@ -1230,6 +1230,8 @@ class WizardOverlay:
         ("ai_model_default",  "AI model: default (extrapolate)","text",None,      0,   0,   0),
         ("ai_model_powerful", "AI model: powerful (cultural context)","text",None,0,   0,   0),
         # ── Appearance ────────────────────────────────────────────────────
+        ("__loadtheme__",     "Load theme",            "action",  None,           0,   0,   0),
+        ("__savetheme__",     "Save theme",            "action",  None,           0,   0,   0),
         ("current_swatch",    "Colour swatch",        "swatch",  None,           0,   0,   1),
         ("current_font_idx",  "UI font",               "font",    None,           0,   0,   1),
         ("ui_font_offset",    "Font size offset",      "int",     None,          -5,  15,   1),
@@ -1460,9 +1462,10 @@ class WizardOverlay:
                 painter.drawText(vx + PAD, row_y + ROW_H - 8, dbg)
                 continue
 
-            # Action row (revert / exit)
+            # Action row (revert / exit / theme)
             if typ == "action":
                 is_revert = key == "__revert__"
+                is_theme  = key in ("__loadtheme__", "__savetheme__")
                 if selected:
                     painter.fillRect(QRect(vx, row_y, vw, ROW_H),
                                      QColor(AMBER.red(), AMBER.green(), AMBER.blue(), 25))
@@ -1471,15 +1474,20 @@ class WizardOverlay:
                 painter.drawText(vx + PAD, row_y + ROW_H - 8, label)
                 if selected:
                     if is_revert and self._confirm_revert:
-                        # Show y/n prompt
                         painter.setFont(font_b)
                         painter.setPen(AMBER_BRIGHT)
                         painter.drawText(vx + vw // 2, row_y + ROW_H - 8,
                                          "Reset all to defaults?  Y = confirm   N / Esc = cancel")
-                    elif selected:
+                    elif self._text_editing and is_theme:
+                        buf = self._text_buffer + "\u258c"
+                        painter.setFont(font_b)
+                        painter.setPen(AMBER_BRIGHT)
+                        val_x = vx + vw - QFontMetrics(font_b).horizontalAdvance(buf) - PAD
+                        painter.drawText(val_x, row_y + ROW_H - 8, buf)
+                    else:
+                        hint = "[Enter name]" if is_theme else "[Enter]"
                         painter.setFont(font_s)
                         painter.setPen(AMBER_DARK)
-                        hint = "[Enter]"
                         painter.drawText(vx + vw - QFontMetrics(font_s).horizontalAdvance(hint) - PAD,
                                          row_y + ROW_H - 8, hint)
                 if not selected:
@@ -1567,7 +1575,16 @@ class WizardOverlay:
     def commit_text_edit(self):
         """Confirm text edit and apply."""
         key = self.steps[self.idx][0]
-        self._apply(key, self._text_buffer)
+        if key == "__loadtheme__":
+            result = self.reader._load_theme(self._text_buffer.strip())
+            self.reader.status_text = result
+            QTimer.singleShot(3000, self.reader._clear_status)
+        elif key == "__savetheme__":
+            result = self.reader._save_theme(self._text_buffer.strip())
+            self.reader.status_text = result
+            QTimer.singleShot(3000, self.reader._clear_status)
+        else:
+            self._apply(key, self._text_buffer)
         self._text_editing = False
         self.reader.update()
 
@@ -3163,14 +3180,18 @@ class ReaderWidget(QWidget):
                 wz._nav(1); self.update()
             elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 if typ == "action":
-                    if wz.current()[0] == "__exit__":
+                    key_name = wz.current()[0]
+                    if key_name == "__exit__":
                         self._close_wizard(); return
-                    elif wz.current()[0] == "__revert__":
+                    elif key_name == "__revert__":
                         if wz._confirm_revert:
                             wz._do_revert()
                         else:
                             wz._confirm_revert = True
                             self.update()
+                        return
+                    elif key_name in ("__loadtheme__", "__savetheme__"):
+                        wz.start_text_edit()
                         return
                 elif typ in ("text", "path"):
                     wz.start_text_edit()
@@ -3549,6 +3570,8 @@ class ReaderWidget(QWidget):
             return
         elif k == Qt.Key.Key_Question:
             self._open_settings_wizard()
+        elif k == Qt.Key.Key_Slash:
+            self._open_panel("ScrollReader — Command Reference", "help")
         elif k == Qt.Key.Key_G:
             if ev.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 # G = bottom of document
