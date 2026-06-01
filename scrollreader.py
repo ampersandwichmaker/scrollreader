@@ -1485,7 +1485,8 @@ class WizardOverlay:
                         val_x = vx + vw - QFontMetrics(font_b).horizontalAdvance(buf) - PAD
                         painter.drawText(val_x, row_y + ROW_H - 8, buf)
                     else:
-                        hint = "[Enter name]" if is_theme else "[Enter]"
+                        is_load = key == "__loadtheme__"
+                        hint = "[←/→ cycle  or  Enter name]" if is_load else ("[Enter name]" if is_theme else "[Enter]")
                         painter.setFont(font_s)
                         painter.setPen(AMBER_DARK)
                         painter.drawText(vx + vw - QFontMetrics(font_s).horizontalAdvance(hint) - PAD,
@@ -1576,7 +1577,8 @@ class WizardOverlay:
         """Confirm text edit and apply."""
         key = self.steps[self.idx][0]
         if key == "__loadtheme__":
-            result = self.reader._load_theme(self._text_buffer.strip())
+            name = self._text_buffer.strip()
+            result = self.reader._load_theme(name if name else "next")
             self.reader.status_text = result
             QTimer.singleShot(3000, self.reader._clear_status)
         elif key == "__savetheme__":
@@ -1722,6 +1724,17 @@ class ReaderWidget(QWidget):
         self._translate_thread: Optional[TranslateThread] = None
         self._translate_anim_timer = QTimer(self)
         self._translate_anim_timer.timeout.connect(self._translate_anim_tick)
+
+        # Define mode state (U key)
+        self._define_mode         = False
+        self._define_word_idx     = 0
+        self._define_result       = ""
+        self._define_fetching     = False
+        self._define_thread       = None
+        self._define_anim_frame   = 0
+
+        # F double-tap state
+        self._f_pending           = False
         self._translate_anim_timer.start(130)
 
         # Wizard state
@@ -2307,6 +2320,8 @@ class ReaderWidget(QWidget):
             self._paint_config_popup(painter)
         if self._translate_mode or self._translate_fetching or self._translate_result:
             self._paint_translate_overlay(painter)
+        if self._define_mode or self._define_fetching or self._define_result:
+            self._paint_define_overlay(painter)
         if self._ai_panel_fetching or self._ai_panel_text:
             self._paint_ai_result_panel(painter)
         if self._wizard:
@@ -3169,9 +3184,19 @@ class ReaderWidget(QWidget):
             if k in (Qt.Key.Key_Escape, Qt.Key.Key_Tab):
                 self._close_wizard()
             elif k in (Qt.Key.Key_Left, Qt.Key.Key_A) and typ not in ("text","path"):
-                wz.adjust(-1)
+                if typ == "action" and wz.current()[0] == "__loadtheme__":
+                    result = wz.reader._load_theme("prev")
+                    wz.reader.status_text = result
+                    QTimer.singleShot(3000, wz.reader._clear_status)
+                else:
+                    wz.adjust(-1)
             elif k in (Qt.Key.Key_Right, Qt.Key.Key_D) and typ not in ("text","path"):
-                wz.adjust(1)
+                if typ == "action" and wz.current()[0] == "__loadtheme__":
+                    result = wz.reader._load_theme("next")
+                    wz.reader.status_text = result
+                    QTimer.singleShot(3000, wz.reader._clear_status)
+                else:
+                    wz.adjust(1)
             elif k in (Qt.Key.Key_Up, Qt.Key.Key_W):
                 wz._confirm_revert = False
                 wz._nav(-1); self.update()
@@ -3263,6 +3288,30 @@ class ReaderWidget(QWidget):
         # Dismiss translation result on any reading key
         if self._translate_result and not self._translate_fetching:
             self._translate_result = ""
+            self.update()
+
+        # ── Define word selection mode (U key) ────────────────────────────
+        if self._define_mode and not self._define_fetching:
+            if self._define_result:
+                self._exit_define_mode(); return
+            words = self._translate_words()
+            n     = len(words)
+            if k == Qt.Key.Key_Escape:
+                self._exit_define_mode(); return
+            elif k in (Qt.Key.Key_Left, Qt.Key.Key_A):
+                self._define_word_idx = max(0, self._define_word_idx - 1)
+                self.update(); return
+            elif k in (Qt.Key.Key_Right, Qt.Key.Key_D):
+                self._define_word_idx = min(n - 1, self._define_word_idx + 1)
+                self.update(); return
+            elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+                if words:
+                    self._do_define(words[self._define_word_idx])
+                return
+            return  # eat all other keys in define mode
+
+        if self._define_result and not self._define_fetching:
+            self._exit_define_mode()
             self.update()
 
         # ── Search panel ──────────────────────────────────────────────────
@@ -3602,6 +3651,19 @@ class ReaderWidget(QWidget):
             self._open_annot_panel("highlights")
         elif k == Qt.Key.Key_T:
             self._enter_translate_mode()
+        elif k == Qt.Key.Key_U:
+            self._enter_define_mode()
+        elif k == Qt.Key.Key_F:
+            if getattr(self, '_f_pending', False):
+                # ff — open command bar pre-filled with sn
+                self._f_pending = False
+                self._enter_command_mode()
+                self.cmd.setText(":sn ")
+                self.cmd.setCursorPosition(len(self.cmd.text()))
+            else:
+                # f — repeat last search
+                self._f_pending = True
+                QTimer.singleShot(300, self._f_single_tap)
         elif k == Qt.Key.Key_R:
             # Return to reading mode — close any open panel (no-op if already reading)
             if self._panel_mode:
@@ -3610,7 +3672,18 @@ class ReaderWidget(QWidget):
 
     def focusOutEvent(self, ev):
         self._g_pending = False
+        self._f_pending = False
         super().focusOutEvent(ev)
+
+    def _f_single_tap(self):
+        """300ms after single F — repeat last search if no second F came."""
+        if not self._f_pending: return
+        self._f_pending = False
+        if self._last_command and self._last_command[:2] in ("sn","sp","sf","sl"):
+            self._run(self._last_command)
+        else:
+            self.status_text = "no previous search"
+            QTimer.singleShot(2000, self._clear_status)
 
     def keyReleaseEvent(self, ev):
         if ev.key() == Qt.Key.Key_Backslash:
@@ -4137,6 +4210,131 @@ class ReaderWidget(QWidget):
             self._translate_thread = None
         self.update()
 
+    # ── Define mode (U key) ───────────────────────────────────────────────
+
+    def _enter_define_mode(self):
+        """Enter word selection mode for definition lookup."""
+        if not self.document or not self.document.lines: return
+        self._define_mode      = True
+        self._define_word_idx  = 0
+        self._define_result    = ""
+        self._define_fetching  = False
+        self._define_anim_frame= 0
+        # Reuse translate's word position cache
+        self._translate_word_xs = self._build_word_xs()
+        self.update()
+
+    def _exit_define_mode(self):
+        self._define_mode     = False
+        self._define_fetching = False
+        self._define_result   = ""
+        self._define_thread   = None
+        self.update()
+
+    def _do_define(self, word: str):
+        """Fire an AI job to define word in the configured UI language."""
+        lang = self.config.get("ui_language") or "english"
+        system = (f"You are a dictionary. Define the word in {lang}. "
+                  f"Be concise: part of speech, primary meaning, one example sentence. "
+                  f"Reply in plain text, no markdown.")
+        cmd = AICommand(
+            key="define", label="Define",
+            chip_source="none", unit="l", context_n=0,
+            tier="default",
+            system_prompt=system,
+        )
+        self._define_result   = ""
+        self._define_fetching = True
+        t = AIJobThread([word], cmd, self.config)
+        t.result_ready.connect(self._on_define_result)
+        self._define_thread = t
+        t.start()
+        self.update()
+
+    def _on_define_result(self, text: str):
+        self._define_result   = text
+        self._define_fetching = False
+        self._define_thread   = None
+        self.update()
+
+    def _paint_define_overlay(self, painter: QPainter):
+        """Draw the definition overlay box — taller than translate to fit full definitions."""
+        ANIM  = [' >>>', '> >>', '>> >', '>>> ']
+        font  = _ui_font(10, bold=True)
+        font_r= _ui_font(10)
+        fm    = QFontMetrics(font)
+        fm_r  = QFontMetrics(font_r)
+        vp    = self._vp()
+        ind_y = self._indicator_screen_y()
+        lh    = self._lh()
+
+        if self._define_fetching:
+            self._define_anim_frame = (self._define_anim_frame + 1) % 4
+            lines_out = [f"{ANIM[self._define_anim_frame]} defining..."]
+        elif self._define_result:
+            # Word-wrap result into lines
+            max_w  = min(600, vp.width() - 40)
+            words  = self._define_result.split()
+            lines_out = []
+            cur = ""
+            for w in words:
+                test = (cur + " " + w).strip()
+                if fm_r.horizontalAdvance(test) <= max_w - 20:
+                    cur = test
+                else:
+                    if cur: lines_out.append(cur)
+                    cur = w
+            if cur: lines_out.append(cur)
+        elif self._define_mode:
+            words = self._translate_words()
+            if words:
+                w = words[self._define_word_idx]
+                lines_out = [f"[ {w} ]  ←/→ select  Enter define  Esc cancel"]
+            else:
+                lines_out = ["(empty line)"]
+        else:
+            return
+
+        line_h = fm_r.height() + 3
+        box_h  = max(36, len(lines_out) * line_h + 16)
+        max_w  = min(600, vp.width() - 40)
+        pw     = max_w
+        box_y  = max(vp.top() + 4, ind_y - box_h - 8)
+
+        # Word-aligned x if in selection mode, else centered
+        if self._define_mode and not self._define_fetching and not self._define_result:
+            raw_x = self._translate_word_x(self._define_word_idx)
+            bx    = max(vp.left() + 4, min(vp.right() - pw - 4, raw_x))
+        else:
+            bx = vp.left() + (vp.width() - pw) // 2
+
+        # Background + border
+        painter.fillRect(QRect(bx, box_y, pw, box_h), UI_BG)
+        painter.setPen(_mk_pen(AMBER_BRIGHT, self._bw()))
+        painter.drawRect(QRect(bx, box_y, pw, box_h))
+
+        # Text lines
+        painter.setPen(AMBER_BRIGHT)
+        for i, line in enumerate(lines_out):
+            f = font if (i == 0 and not self._define_result) else font_r
+            painter.setFont(f)
+            painter.drawText(bx + 10, box_y + 10 + i * line_h + fm_r.ascent(), line)
+
+        # Word highlight (selection mode only)
+        if self._define_mode and not self._define_fetching and not self._define_result:
+            words = self._translate_words()
+            if words:
+                idx  = self._define_word_idx
+                wx   = self._translate_word_x(idx)
+                word = words[idx]
+                xs   = getattr(self, '_translate_word_xs', [])
+                ww   = (xs[idx+1] - xs[idx] - 2) if xs and idx < len(xs)-1 else len(word) * max(4, int(7 * self.document.zoom))
+                ind  = QColor(self._cfg("indicator_color") or "#ffb000")
+                h, s, v, _ = ind.getHsvF()
+                comp = QColor.fromHsvF((h + 0.33) % 1.0, max(0.6, s), max(0.7, v))
+                comp.setAlpha(120)
+                painter.fillRect(QRect(wx, ind_y, ww, lh), comp)
+
     def _do_translate(self, text: str):
         lang = self.config.get("translate_target_lang") or ""
         if not lang:
@@ -4549,32 +4747,75 @@ class ReaderWidget(QWidget):
 
     def _load_theme(self, name: str) -> str:
         import json
-        # Accept with or without .json extension
         d = self._themes_dir()
-        p = d / f"{name}.json" if not name.endswith(".json") else d / name
-        if not p.exists():
-            return f"theme not found: {name}"
+        themes = sorted(d.glob("*.json"))
+
+        # Cycle mode: empty name or "next"/"prev" cycles through available themes
+        if not name or name in ("next", ""):
+            if not themes:
+                return "no themes in themes/ folder"
+            cur = getattr(self, '_theme_cycle_idx', -1)
+            self._theme_cycle_idx = (cur + 1) % len(themes)
+            p = themes[self._theme_cycle_idx]
+        elif name == "prev":
+            if not themes:
+                return "no themes in themes/ folder"
+            cur = getattr(self, '_theme_cycle_idx', 0)
+            self._theme_cycle_idx = (cur - 1) % len(themes)
+            p = themes[self._theme_cycle_idx]
+        else:
+            p = d / f"{name}.json" if not name.endswith(".json") else d / name
+            if not p.exists():
+                return f"theme not found: {name}"
+            # Set cycle index to this theme
+            try:
+                self._theme_cycle_idx = [t.stem for t in themes].index(p.stem)
+            except ValueError:
+                pass
+
         try:
             data = json.loads(p.read_text())
         except Exception as ex:
             return f"theme load error: {ex}"
-        global TOP_BAR_H, BOTTOM_BAR_H, PANEL_W
+
+        global TOP_BAR_H, BOTTOM_BAR_H, PANEL_W, MARGIN_COLLAPSED_W
+        font_changed  = False
+        zoom_changed  = False
+
         for k, v in data.items():
             if k in ("schema", "name"): continue
             self.config.set(k, v)
-            if k == "top_bar_h":       TOP_BAR_H    = int(v)
-            elif k == "bottom_bar_h":  BOTTOM_BAR_H = int(v)
-            elif k == "panel_w":       PANEL_W      = int(v)
+            if   k == "top_bar_h":           TOP_BAR_H           = int(v)
+            elif k == "bottom_bar_h":        BOTTOM_BAR_H        = int(v)
+            elif k == "panel_w":             PANEL_W             = int(v)
+            elif k == "margin_collapsed_w":  MARGIN_COLLAPSED_W  = int(v)
             elif k == "ui_font_offset":
                 _UI_FONT_OFFSET_ref[0] = int(v)
-                self._update_cmd_style()
+                font_changed = True
             elif k == "current_font_idx":
                 fonts = _scan_fonts()
                 idx   = int(v)
                 if fonts and 0 <= idx < len(fonts):
-                    _UI_FONT_FAMILY_ref[0] = _load_font_by_path(fonts[idx]) or _UI_FONT_FAMILY_ref[0]
+                    fam = _load_font_by_path(fonts[idx])
+                    if fam: _UI_FONT_FAMILY_ref[0] = fam
+                    font_changed = True
+            elif k == "current_swatch":
+                _apply_swatch(str(v), self.config)
+            elif k == "zoom_mode":
+                self.zoom_mode = str(v)
+                zoom_changed = True
+
+        # Apply theme colors to globals
+        _apply_theme(self.config)
+
+        if font_changed:
+            self._update_cmd_style()
+
+        if zoom_changed and self.document:
+            self._rerender()
+
         self.update()
-        return f"theme loaded: {data.get('name', name)}"
+        return f"theme loaded: {data.get('name', p.stem)}  ({self._theme_cycle_idx + 1}/{len(themes)})"
 
     def _list_themes(self) -> Optional[str]:
         themes = sorted(self._themes_dir().glob("*.json"))
