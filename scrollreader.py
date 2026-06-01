@@ -2145,28 +2145,12 @@ class ReaderWidget(QWidget):
         # ── Pages ─────────────────────────────────────────────────────────
         inv = _pdf_invert_ref[0]
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
-        dpr = self.devicePixelRatioF()
-        if dpr != 1.0:
-            painter.save()
-            painter.scale(1.0 / dpr, 1.0 / dpr)
-            for i in range(self.document.page_count):
-                py = vp.y() + self.document.page_offsets[i] - scroll
-                pw, ph = self.document.page_sizes[i]
-                if py + ph >= vp.y() and py <= vp.bottom():
-                    pm = self.document.get_pixmap(i, inverted=inv)
-                    # Draw at exact pixmap dimensions — no scaling, no blur
-                    painter.drawPixmap(int(px * dpr), int(py * dpr),
-                                       pm.width(), pm.height(), pm)
-            painter.restore()
-        else:
-            for i in range(self.document.page_count):
-                py = vp.y() + self.document.page_offsets[i] - scroll
-                pw, ph = self.document.page_sizes[i]
-                if py + ph >= vp.y() and py <= vp.bottom():
-                    pm = self.document.get_pixmap(i, inverted=inv)
-                    # Draw at exact pixmap dimensions — no scaling, no blur
-                    painter.drawPixmap(int(px), int(py),
-                                       pm.width(), pm.height(), pm)
+        for i in range(self.document.page_count):
+            py = vp.y() + self.document.page_offsets[i] - scroll
+            pw, ph = self.document.page_sizes[i]
+            if py + ph >= vp.y() and py <= vp.bottom():
+                pm = self.document.get_pixmap(i, inverted=inv)
+                painter.drawPixmap(int(px), int(py), pm.width(), pm.height(), pm)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
         # ── Saved highlights (on PDF) ──────────────────────────────────────
