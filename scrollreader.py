@@ -840,20 +840,28 @@ class PDFDocument:
         self.lines.sort(key=lambda l: l.abs_y)
 
     def render_page(self, pn: int, dpr: float = 1.0) -> QPixmap:
-        mat = fitz.Matrix(self.zoom, self.zoom)
-        pix = self.doc[pn].get_pixmap(matrix=mat, alpha=False)
-        img = QImage(pix.samples, pix.width, pix.height,
-                     pix.stride, QImage.Format.Format_RGB888)
-        return QPixmap.fromImage(img)
+        scale = self.zoom * dpr
+        mat   = fitz.Matrix(scale, scale)
+        pix   = self.doc[pn].get_pixmap(matrix=mat, alpha=False)
+        img   = QImage(pix.samples, pix.width, pix.height,
+                       pix.stride, QImage.Format.Format_RGB888)
+        pm = QPixmap.fromImage(img)
+        if dpr != 1.0:
+            pm.setDevicePixelRatio(dpr)
+        return pm
 
     def render_page_inv(self, pn: int, dpr: float = 1.0) -> QPixmap:
         """Render a page with colors inverted."""
-        mat = fitz.Matrix(self.zoom, self.zoom)
-        pix = self.doc[pn].get_pixmap(matrix=mat, alpha=False)
+        scale = self.zoom * dpr
+        mat   = fitz.Matrix(scale, scale)
+        pix   = self.doc[pn].get_pixmap(matrix=mat, alpha=False)
         pix.invert_irect()
-        img = QImage(pix.samples, pix.width, pix.height,
-                     pix.stride, QImage.Format.Format_RGB888)
-        return QPixmap.fromImage(img)
+        img   = QImage(pix.samples, pix.width, pix.height,
+                       pix.stride, QImage.Format.Format_RGB888)
+        pm = QPixmap.fromImage(img)
+        if dpr != 1.0:
+            pm.setDevicePixelRatio(dpr)
+        return pm
 
     def render_range(self, start: int, end: int, inverted: bool = False):
         start = max(0, start)
@@ -1959,8 +1967,8 @@ class ReaderWidget(QWidget):
     # ---------------------------------------------------------------- zoom
 
     def _fit_width_zoom(self, nw: float) -> float:
-        """Zoom using screen width minus margin panel — fits in the reading area."""
-        uw = _SCREEN_WIDTH_ref[0] - PANEL_W - 40
+        """Zoom to fill full screen width minus small padding."""
+        uw = _SCREEN_WIDTH_ref[0] - 40
         return max(0.1, uw / nw)
 
     def _compute_zoom_for_doc(self, mode: str, doc: 'PDFDocument') -> float:
@@ -2052,6 +2060,7 @@ class ReaderWidget(QWidget):
         side   = self._margin_side()
         area_x = PANEL_W if side == "left" else 0
         area_w = _SCREEN_WIDTH_ref[0] - PANEL_W
+        # Center page within reading area; page may extend slightly into margin
         return area_x + max(0, (area_w - self.document.max_width) // 2)
 
     def _lines_per_screen(self):
@@ -2150,7 +2159,9 @@ class ReaderWidget(QWidget):
             pw, ph = self.document.page_sizes[i]
             if py + ph >= vp.y() and py <= vp.bottom():
                 pm = self.document.get_pixmap(i, inverted=inv)
-                painter.drawPixmap(int(px), int(py), pm.width(), pm.height(), pm)
+                # Draw without explicit size — Qt uses pm.devicePixelRatio()
+                # to compute logical display size, giving crisp HiDPI rendering
+                painter.drawPixmap(int(px), int(py), pm)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
         # ── Saved highlights (on PDF) ──────────────────────────────────────
