@@ -816,11 +816,8 @@ class PDFDocument:
         cy = 0
         for pn, page in enumerate(self.doc):
             r   = page.rect
-            # Use exact fitz pixel dimensions (same matrix as render_page)
-            mat = fitz.Matrix(self.zoom, self.zoom)
-            prect = r * mat
-            w   = int(prect.width)
-            h   = int(prect.height)
+            w   = int(r.width  * self.zoom)
+            h   = int(r.height * self.zoom)
             self.page_sizes.append((w, h))
             self.page_offsets.append(cy)
             self.page_pixmaps.append(None)
@@ -863,14 +860,14 @@ class PDFDocument:
             pm.setDevicePixelRatio(dpr)
         return pm
 
-    def render_range(self, start: int, end: int, inverted: bool = False):
+    def render_range(self, start: int, end: int, inverted: bool = False, dpr: float = 1.0):
         start = max(0, start)
         end   = min(len(self.doc) - 1, end)
         for pn in range(start, end + 1):
             if self.page_pixmaps[pn] is None:
-                self.page_pixmaps[pn] = self.render_page(pn)
+                self.page_pixmaps[pn] = self.render_page(pn, dpr)
             if inverted and self.page_pixmaps_inv[pn] is None:
-                self.page_pixmaps_inv[pn] = self.render_page_inv(pn)
+                self.page_pixmaps_inv[pn] = self.render_page_inv(pn, dpr)
 
     def placeholder(self, pn: int) -> QPixmap:
         w, h = self.page_sizes[pn]
@@ -1849,8 +1846,9 @@ class ReaderWidget(QWidget):
             cur_page  = doc.lines[self.current_line].page_num if doc.lines else 0
             eager     = int(self.config.get("eager_pages") or 2)
             preload   = bool(self.config.get("preload_inverted") if self.config.get("preload_inverted") is not None else True)
+            dpr       = max(1.0, self.devicePixelRatioF())
             doc.render_range(cur_page - eager, cur_page + eager,
-                             inverted=preload)
+                             inverted=preload, dpr=dpr)
 
             self.update()
 
@@ -1925,7 +1923,7 @@ class ReaderWidget(QWidget):
         lo, hi    = self._compute_cache_window(start_page)
         self._cache_lo = lo
         self._cache_hi = hi
-        dpr = self.devicePixelRatioF()
+        dpr = max(1.0, self.devicePixelRatioF())
         t = RenderThread(self.document, start_page, preload_inv=preload, lo=lo, hi=hi, dpr=dpr)
         t.page_ready.connect(self._on_page_ready)
         t.page_ready_inv.connect(self._on_page_ready_inv)
@@ -3423,9 +3421,10 @@ class ReaderWidget(QWidget):
                 if _pdf_invert_ref[0]:
                     cur_page = self.document.lines[self.current_line].page_num if self.document.lines else 0
                     eager    = int(self.config.get("eager_pages") or 2)
+                    dpr = max(1.0, self.devicePixelRatioF())
                     for pn in range(max(0, cur_page-eager), min(self.document.page_count, cur_page+eager+1)):
                         if self.document.page_pixmaps_inv[pn] is None:
-                            self.document.page_pixmaps_inv[pn] = self.document.render_page_inv(pn)
+                            self.document.page_pixmaps_inv[pn] = self.document.render_page_inv(pn, dpr)
             self.update()
         elif k == Qt.Key.Key_Equal:
             # Undo last movement
@@ -4367,7 +4366,8 @@ class ReaderWidget(QWidget):
             mid_page = self.document.lines[self.current_line].page_num if self.document.lines else 0
             eager    = int(self.config.get("eager_pages") or 2)
             self.document.render_range(mid_page - eager, mid_page + eager,
-                                       inverted=bool(self.config.get("preload_inverted") if self.config.get("preload_inverted") is not None else True))
+                                       inverted=bool(self.config.get("preload_inverted") if self.config.get("preload_inverted") is not None else True),
+                                       dpr=max(1.0, self.devicePixelRatioF()))
         # combined and app: stay at current position, no preview jump
         self.update()
 
