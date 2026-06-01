@@ -1786,7 +1786,8 @@ class ReaderWidget(QWidget):
     def _on_resize_done(self):
         self._clear_status()
         if self.document and self.zoom_mode in ("fit-width", "fit-page"):
-            self._rerender()
+            if not getattr(self, '_load_in_progress', False):
+                self._rerender()
 
     def _enter_command_mode(self):
         if time.time() < self._cmd_cooldown:
@@ -1821,6 +1822,13 @@ class ReaderWidget(QWidget):
         if not os.path.exists(filepath):
             self.status_text = f"file not found: {filepath}"; self.update(); return
 
+        self._load_in_progress = True
+        try:
+            self._load_document_inner(filepath)
+        finally:
+            self._load_in_progress = False
+
+    def _load_document_inner(self, filepath: str):
         # Cancel any in-progress render
         self._stop_render_thread()
 
