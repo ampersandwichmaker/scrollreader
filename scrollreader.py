@@ -1766,9 +1766,22 @@ class ReaderWidget(QWidget):
         path = getattr(self, '_pending_load', None)
         if path:
             del self._pending_load
-            # singleShot(0) yields to event loop so widget is fully laid out
-            # and devicePixelRatioF() returns the correct DPR value
-            QTimer.singleShot(0, lambda: self.load_document(path))
+            def _safe_load():
+                try:
+                    self.load_document(path)
+                except Exception as ex:
+                    import traceback
+                    self.status_text = f"load error: {ex}"
+                    # Write crash details to a log file next to the exe
+                    try:
+                        log = os.path.join(_app_dir(), "scrollreader_crash.log")
+                        with open(log, "a") as f:
+                            f.write(f"\n--- startup load crash ---\n")
+                            traceback.print_exc(file=f)
+                    except Exception:
+                        pass
+                    self.update()
+            QTimer.singleShot(300, _safe_load)
 
     def resizeEvent(self, ev):
         self.cmd.setGeometry(0, self.height()-BOTTOM_BAR_H, self.width(), BOTTOM_BAR_H)
