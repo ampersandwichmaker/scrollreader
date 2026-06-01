@@ -2406,10 +2406,15 @@ class ReaderWidget(QWidget):
 
         x = PAD
 
-        # METAR + Menu always left
-        metar_lbl = self._metar() if self.document else "SCROLLREADER"
-        x = _draw_btn("metar", metar_lbl, x, active=self._top_dropdown == "metar")
-        x += 2
+        # METAR as plain text (not a button)
+        if self.document:
+            metar_lbl = self._metar()
+            painter.setFont(font)
+            painter.setPen(AMBER_DIM)
+            painter.drawText(x, BTN_Y + BTN_H - 4, metar_lbl)
+            x += fm.horizontalAdvance(metar_lbl) + 8
+
+        # Menu dropdown button
         x = _draw_btn("menu", "Menu", x, active=self._top_dropdown == "menu")
         x += 6
 
@@ -2418,7 +2423,7 @@ class ReaderWidget(QWidget):
             cur_line = self.current_line
             has_bm   = any(b.get("line") == cur_line for b in e.get("bookmarks", []))
             has_note = any(n.get("line") == cur_line for n in e.get("notes", []))
-            has_hl   = any(h.get("start_line",0) <= cur_line <= h.get("end_line", cur_line)
+            has_hl   = any(h.get("start_line", 0) <= cur_line <= h.get("end_line", cur_line)
                            for h in e.get("highlights", []))
             has_an   = any(a.get("line") == cur_line for a in e.get("audio_notes", []))
 
@@ -2440,7 +2445,7 @@ class ReaderWidget(QWidget):
             x = _draw_btn("search", "Search", x)
             x += 6
 
-        # Status text after buttons
+        # Status text
         if self.status_text:
             painter.setFont(font)
             painter.setPen(AMBER_BRIGHT)
@@ -2454,9 +2459,6 @@ class ReaderWidget(QWidget):
         """Paint the currently open dropdown menu."""
         which = self._top_dropdown
         if not which: return
-        if which == "metar" and not self.document:
-            self._top_dropdown = None
-            return
 
         font_b  = _ui_font(9, bold=True)
         font    = _ui_font(9)
@@ -2466,36 +2468,19 @@ class ReaderWidget(QWidget):
         ROW_H   = max(22, fm.height() + 8)
         self._top_dd_rects = {}
 
-        if which == "metar" and self.document:
-            e       = self.history._entry(self.document.filepath)
-            total   = len(self.document.lines)
-            pct     = int(self.current_line / max(total, 1) * 100)
-            n_bm    = len(e.get("bookmarks",   []))
-            n_note  = len(e.get("notes",        []))
-            n_hl    = len(e.get("highlights",   []))
-            n_an    = len(e.get("audio_notes",  []))
-            status  = e.get("status", "unread")
-            rating  = "★" * int(e.get("rating", 0))
+        if which == "menu":
             rows = [
-                ("__header__", self._metar(), None),
-                ("__sep__",    "",            None),
-                ("bookmarks",  f"Bookmarks",  str(n_bm)),
-                ("notes",      f"Notes",      str(n_note)),
-                ("highlights", f"Highlights", str(n_hl)),
-                ("audio",      f"Audio Notes",str(n_an)),
-                ("__sep__",    "",            None),
-                ("__info__",   f"Progress",   f"{pct}%"),
-                ("__info__",   f"Status",     status),
-                ("__info__",   f"Rating",     rating or "—"),
-            ]
-        elif which == "menu":
-            rows = [
-                ("library",    "Library",     "L"),
-                ("settings",   "Settings",    "?"),
-                ("export",     "Export all",  "e"),
-                ("__sep__",    "",            None),
-                ("abandon",    "Abandon",     ""),
-                ("close",      "Close",       "×"),
+                ("bookmarks",  "Bookmarks",    "B"),
+                ("notes",      "Notes",        "N"),
+                ("highlights", "Highlights",   "H"),
+                ("audio",      "Audio Notes",  ""),
+                ("__sep__",    "",             None),
+                ("library",    "Library",      "L"),
+                ("settings",   "Settings",     "?"),
+                ("export",     "Export all",   "x"),
+                ("__sep__",    "",             None),
+                ("abandon",    "Abandon",      ""),
+                ("close",      "Close",        ""),
             ]
         else:
             return
@@ -3942,8 +3927,8 @@ class ReaderWidget(QWidget):
 
     def _handle_top_btn(self, name: str):
         """Handle a top bar button click."""
-        if name in ("metar", "menu"):
-            self._top_dropdown = name if self._top_dropdown != name else None
+        if name == "menu":
+            self._top_dropdown = "menu" if self._top_dropdown != "menu" else None
             self._top_dd_hover = None
             self.update()
             return
@@ -3988,15 +3973,14 @@ class ReaderWidget(QWidget):
         if len(parts) < 2: self.update(); return
         which, key = parts[0], parts[1]
 
-        if which == "metar" and self.document:
-            if key == "bookmarks":    self._open_annot_panel("bookmarks")
-            elif key == "notes":      self._open_annot_panel("notes")
-            elif key == "highlights": self._open_annot_panel("highlights")
-            elif key == "audio":      self._open_annot_panel("audionotes")
-        elif which == "menu":
-            if key == "library":     self.window().show_library()
+        if which == "menu":
+            if key == "bookmarks":   self._open_annot_panel("bookmarks")
+            elif key == "notes":     self._open_annot_panel("notes")
+            elif key == "highlights":self._open_annot_panel("highlights")
+            elif key == "audio":     self._open_annot_panel("audionotes")
+            elif key == "library":   self.window().show_library()
             elif key == "settings":  self._open_settings_wizard()
-            elif key == "export":    self._run("e")
+            elif key == "export":    self._run("x")
             elif key == "abandon":
                 self._pending = {"action": "abandon"}
                 self.status_text = "Abandon this book?  Y to confirm  N to cancel"
