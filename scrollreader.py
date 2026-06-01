@@ -2385,17 +2385,17 @@ class ReaderWidget(QWidget):
         painter.setPen(_mk_pen(AMBER_DARK, bw))
         painter.drawLine(0, h-1, w, h-1)
 
-        PAD  = 6
+        PAD   = 6
         BTN_H = h - 6
         BTN_Y = 3
+        self._top_btn_rects = {}
 
-        def _draw_btn(name: str, label: str, x: int,
-                      active: bool = False, danger: bool = False) -> int:
-            bw2   = fm.horizontalAdvance(label) + PAD * 2
-            r     = QRect(x, BTN_Y, bw2, BTN_H)
+        def _draw_btn(name, label, x, active=False, danger=False):
+            bw2 = fm.horizontalAdvance(label) + PAD * 2
+            r   = QRect(x, BTN_Y, bw2, BTN_H)
             self._top_btn_rects[name] = r
-            col   = AMBER_BRIGHT if active else (QColor("#ff6666") if danger else AMBER_DIM)
-            bg    = QColor(col.red(), col.green(), col.blue(), 40 if active else 0)
+            col = AMBER_BRIGHT if active else (QColor("#ff6666") if danger else AMBER_DIM)
+            bg  = QColor(col.red(), col.green(), col.blue(), 40 if active else 0)
             if bg.alpha(): painter.fillRect(r, bg)
             painter.setPen(_mk_pen(col, bw))
             painter.drawRect(r)
@@ -2406,63 +2406,52 @@ class ReaderWidget(QWidget):
 
         x = PAD
 
-        # METAR dropdown button — shows METAR code, expands to human-readable
+        # METAR + Menu always left
+        metar_lbl = self._metar() if self.document else "SCROLLREADER"
+        x = _draw_btn("metar", metar_lbl, x, active=self._top_dropdown == "metar")
+        x += 2
+        x = _draw_btn("menu", "Menu", x, active=self._top_dropdown == "menu")
+        x += 6
+
         if self.document:
-            metar_code = "NOBOOK" if not self.document else self._metar()
-            x = _draw_btn("metar", metar_code,  x,
-                          active=self._top_dropdown == "metar")
-            x += 4
-
-            # Annotation buttons
-            e = self.history._entry(self.document.filepath)
+            e        = self.history._entry(self.document.filepath)
             cur_line = self.current_line
-            has_bm  = any(b.get("line") == cur_line for b in e.get("bookmarks", []))
-            has_note= any(n.get("line") == cur_line for n in e.get("notes", []))
-            has_hl  = any(h.get("start_line") <= cur_line <= h.get("end_line", cur_line)
-                          for h in e.get("highlights", []))
-            has_an  = any(a.get("line") == cur_line for a in e.get("audio_notes", []))
+            has_bm   = any(b.get("line") == cur_line for b in e.get("bookmarks", []))
+            has_note = any(n.get("line") == cur_line for n in e.get("notes", []))
+            has_hl   = any(h.get("start_line",0) <= cur_line <= h.get("end_line", cur_line)
+                           for h in e.get("highlights", []))
+            has_an   = any(a.get("line") == cur_line for a in e.get("audio_notes", []))
 
-            x = _draw_btn("add_bm",    "Bookmark",      x, active=has_bm)
-            x = _draw_btn("rem_bm",    "- Bookmark",    x, danger=has_bm)
+            x = _draw_btn("add_bm",    "Bookmark",    x, active=has_bm)
+            x = _draw_btn("rem_bm",    "- Bookmark",  x, danger=has_bm)
             x += 3
-            x = _draw_btn("add_note",  "Note",          x, active=has_note)
-            x = _draw_btn("rem_note",  "- Note",        x, danger=has_note)
+            x = _draw_btn("add_note",  "Note",        x, active=has_note)
+            x = _draw_btn("rem_note",  "- Note",      x, danger=has_note)
             x += 3
-            x = _draw_btn("add_audio", "Audio",         x, active=has_an)
-            x = _draw_btn("rem_audio", "- Audio",       x, danger=has_an)
+            x = _draw_btn("add_audio", "Audio",       x, active=has_an)
+            x = _draw_btn("rem_audio", "- Audio",     x, danger=has_an)
             x += 3
-            x = _draw_btn("add_hl",    "Highlight",     x, active=has_hl)
-            x = _draw_btn("rem_hl",    "- Highlight",   x, danger=has_hl)
-            x += 8
-
-            # Invert toggle
-            inv  = bool(_pdf_invert_ref[0])
+            x = _draw_btn("add_hl",    "Highlight",   x, active=has_hl)
+            x = _draw_btn("rem_hl",    "- Highlight", x, danger=has_hl)
+            x += 6
+            inv = bool(_pdf_invert_ref[0])
             x = _draw_btn("invert", "Invert", x, active=inv)
             x += 3
             x = _draw_btn("search", "Search", x)
-            x += 8
-        else:
-            painter.setPen(AMBER_DIM)
+            x += 6
+
+        x = _draw_btn("close", "Close", x)
+        x += 6
+
+        # Status text right after Close
+        if self.status_text:
             painter.setFont(font)
-            painter.drawText(PAD + 4, h - 8, "SCROLLREADER")
+            painter.setPen(AMBER_BRIGHT)
+            painter.drawText(x + 2, BTN_Y + BTN_H - 4, self.status_text)
 
-        # MENU dropdown — right-aligned before close
-        close_w = BTN_H + 4
-        menu_x  = w - close_w - 3 - (fm.horizontalAdvance("MENU") + PAD*2) - 3
-        _draw_btn("menu", "MENU", menu_x,
-                  active=self._top_dropdown == "menu")
-        # Close button
-        close_r = QRect(w - close_w - 2, BTN_Y, close_w, BTN_H)
-        self._top_btn_rects["close"] = close_r
-        painter.setPen(_mk_pen(AMBER_DARK, bw))
-        painter.drawRect(close_r)
-        painter.setFont(font)
-        painter.setPen(AMBER_DIM)
-        painter.drawText(close_r, Qt.AlignmentFlag.AlignCenter, "×")
-
-        # Draw open dropdown
         if self._top_dropdown:
             self._paint_top_dropdown(painter)
+
 
     def _paint_top_dropdown(self, painter: QPainter):
         """Paint the currently open dropdown menu."""
@@ -2609,12 +2598,6 @@ class ReaderWidget(QWidget):
                 painter.setFont(font)
                 rx = w - QFontMetrics(font).horizontalAdvance(mode_txt) - 10
                 painter.drawText(rx, ty, mode_txt)
-
-            # Status text overlays ref when set
-            if self.status_text:
-                painter.setPen(AMBER_BRIGHT)
-                painter.setFont(font_b)
-                painter.drawText(8, ty, self.status_text)
 
     # ── Margin indicators ─────────────────────────────────────────────────
 
@@ -3977,17 +3960,25 @@ class ReaderWidget(QWidget):
             self.cmd.setCursorPosition(len(self.cmd.text()))
             return
         if not self.document: return
-        if name == "add_bm":    self._run("b"); return
-        if name == "rem_bm":    self._run("rb"); return
+        doc  = self.document
+        line = self.current_line
+        lines = doc.lines
+        e = self.history._entry(doc.filepath)
+
+        if name == "add_bm":
+            self.history.add_bookmark(doc.filepath, line, lines[line].page_num if lines else 0, "")
+            self.update(); return
+        if name == "rem_bm":    self._run("rb"); self.update(); return
         if name == "add_note":
             self._enter_command_mode()
             self.cmd.setText(":n ")
             self.cmd.setCursorPosition(len(self.cmd.text()))
             return
-        if name == "rem_note":  self._run("rn"); return
+        if name == "rem_note":  self._run("rn"); self.update(); return
         if name == "add_audio": self._run("an"); return
         if name == "rem_audio": self._run("ran"); return
-        if name == "add_hl":    self._run("hl"); return
+        if name == "add_hl":
+            self._run("hl"); return
         if name == "rem_hl":    self._run("rhl"); return
 
     def _handle_dropdown_item(self, item_key: str):
