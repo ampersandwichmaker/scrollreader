@@ -2440,10 +2440,7 @@ class ReaderWidget(QWidget):
             x = _draw_btn("search", "Search", x)
             x += 6
 
-        x = _draw_btn("close", "Close", x)
-        x += 6
-
-        # Status text right after Close
+        # Status text after buttons
         if self.status_text:
             painter.setFont(font)
             painter.setPen(AMBER_BRIGHT)
@@ -2455,7 +2452,12 @@ class ReaderWidget(QWidget):
 
     def _paint_top_dropdown(self, painter: QPainter):
         """Paint the currently open dropdown menu."""
-        which   = self._top_dropdown
+        which = self._top_dropdown
+        if not which: return
+        if which == "metar" and not self.document:
+            self._top_dropdown = None
+            return
+
         font_b  = _ui_font(9, bold=True)
         font    = _ui_font(9)
         fm      = QFontMetrics(font_b)
@@ -3945,9 +3947,6 @@ class ReaderWidget(QWidget):
             self._top_dd_hover = None
             self.update()
             return
-        if name == "close":
-            from PyQt6.QtWidgets import QApplication as _QApp
-            _QApp.quit(); return
         if name == "invert":
             _pdf_invert_ref[0] = not _pdf_invert_ref[0]
             if self.document:
