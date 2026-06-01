@@ -1817,8 +1817,6 @@ class ReaderWidget(QWidget):
             self.current_line = min(self.history.get_line(filepath), max(0, len(doc.lines)-1))
             self.panel        = None
             self._pending     = None
-            # Debug: show zoom and screen width used
-            self.status_text = f"zoom={doc.zoom:.3f} sw={_SCREEN_WIDTH_ref[0]} pw={doc.max_width}"
 
             # Restore per-book invert state
             _pdf_invert_ref[0] = bool(
@@ -1946,8 +1944,8 @@ class ReaderWidget(QWidget):
     # ---------------------------------------------------------------- zoom
 
     def _fit_width_zoom(self, nw: float) -> float:
-        """Zoom using screen width captured at startup — always correct."""
-        uw = _SCREEN_WIDTH_ref[0] - 40
+        """Zoom using screen width minus margin panel — fits in the reading area."""
+        uw = _SCREEN_WIDTH_ref[0] - PANEL_W - 40
         return max(0.1, uw / nw)
 
     def _compute_zoom_for_doc(self, mode: str, doc: 'PDFDocument') -> float:
@@ -2036,16 +2034,9 @@ class ReaderWidget(QWidget):
 
     def _page_x_offset(self):
         if not self.document: return 0
-        side      = self._margin_side()
-        # Non-margin area: from 0 to (w - PANEL_W) for right margin,
-        # or from PANEL_W to w for left margin
-        if side == "left":
-            area_x = PANEL_W
-            area_w = self.width() - PANEL_W
-        else:
-            area_x = 0
-            area_w = self.width() - PANEL_W
-        # Center the page within that area
+        side   = self._margin_side()
+        area_x = PANEL_W if side == "left" else 0
+        area_w = _SCREEN_WIDTH_ref[0] - PANEL_W
         return area_x + max(0, (area_w - self.document.max_width) // 2)
 
     def _lines_per_screen(self):
