@@ -439,7 +439,7 @@ def parse_shortcut(text: str) -> Optional[dict]:
         return {"cmd": "removeall_plus"}
     if b == "removeall":
         return {"cmd": "removeall", "reason": note}
-    if b == "e":
+    if b == "x":
         return {"cmd": "export_all"}
 
     # Simple navigation (no range system, just optional count)
@@ -487,10 +487,10 @@ def parse_shortcut(text: str) -> Optional[dict]:
 
     # Export commands
     for pat, cmd in [
-        (r"(el|exportline)(" + RANGE_CHARS + r")",      "export_line"),
-        (r"(ep|exportpage)(" + RANGE_CHARS + r")",      "export_page"),
+        (r"(xl|exportline)(" + RANGE_CHARS + r")",      "export_line"),
+        (r"(xp|exportpage)(" + RANGE_CHARS + r")",      "export_page"),
         (r"(xb|exportbookmark)(" + RANGE_CHARS + r")",  "export_bookmark"),
-        (r"(en|exportnote)(" + RANGE_CHARS + r")",      "export_note"),
+        (r"(xn|exportnote)(" + RANGE_CHARS + r")",      "export_note"),
         (r"(xh|exporthighlight)(" + RANGE_CHARS + r")", "export_highlight"),
     ]:
         m = re.fullmatch(pat, b)
@@ -1244,6 +1244,18 @@ class WizardOverlay:
         ("library_dir",       "Library folder",        "path",    None,           0,   0,   0),
         ("max_cached_pages",  "Max cached pages (0=unlimited)", "int", None,      0, 2000, 50),
         ("max_cache_mb",      "Max cache RAM MB (0=use page limit)", "int", None, 0, 32768, 256),
+        # ── Advanced ──────────────────────────────────────────────────────
+        ("__section__",       "── ADVANCED APP SETTINGS ──",  "divider", None,   0,   0,   0),
+        ("reopen_last",       "Reopen last book on launch",   "bool",    None,   0,   1,   1),
+        ("preload_inverted",  "Preload inverted pages",        "bool",    None,   0,   1,   1),
+        ("page_gap",          "Page gap (px)",                 "int",     None,   0, 100,   5),
+        ("midpoint",          "Reading midpoint (0.0–1.0)",    "text",    None,   0,   0,   0),
+        ("export_dir",        "Export directory",              "path",    None,   0,   0,   0),
+        ("export_mode",       "Export mode",                   "choice",  ["timestamped","running"], 0, 0, 1),
+        ("library_recursive", "Scan subdirectories",           "bool",    None,   0,   1,   1),
+        ("mark_color_bookmark","Bookmark color",               "color",   None,   0,   0,   5),
+        ("mark_color_note",   "Note color",                    "color",   None,   0,   0,   5),
+        ("mark_color_audio",  "Audio note color",              "color",   None,   0,   0,   5),
         # ── Actions ───────────────────────────────────────────────────────
         ("__revert__",        "Revert to defaults",    "action",  None,           0,   0,   0),
         ("__exit__",          "Exit settings",         "action",  None,           0,   0,   0),
@@ -1258,6 +1270,13 @@ class WizardOverlay:
         ("zoom_mode",         "Zoom mode",             "choice",
             ["fit-width","fit-page","50%","75%","100%","110%","120%"], 0, 0, 1),
         ("__zoomdebug__",     "zoom info",             "debug",   None,           0,   0,   0),
+        # ── Advanced PDF ──────────────────────────────────────────────────
+        ("__section__",       "── ADVANCED PDF SETTINGS ──",  "divider", None,   0,   0,   0),
+        ("__meta_title__",    "Book title",            "bookmeta", None,          0,   0,   0),
+        ("__meta_author__",   "Author",                "bookmeta", None,          0,   0,   0),
+        ("__meta_status__",   "Status",                "choice",  ["unread","reading","read","abandoned"], 0, 0, 1),
+        ("__meta_rating__",   "Rating (0-5)",          "int",     None,           0,   5,   1),
+        ("__meta_tags__",     "Tags (comma-separated)","bookmeta", None,          0,   0,   0),
         # ── Actions ───────────────────────────────────────────────────────
         ("__revert__",        "Revert to defaults",    "action",  None,           0,   0,   0),
         ("__exit__",          "Exit settings",         "action",  None,           0,   0,   0),
@@ -1307,7 +1326,7 @@ class WizardOverlay:
     def adjust(self, direction: int):
         if self._is_divider(self.idx): return
         key, label, typ, choices, mn, mx, step = self.current()
-        if typ == "action": return
+        if typ in ("action", "bookmeta"): return
         cur = self.get_val()
         if typ == "swatch":
             idx = SWATCH_NAMES.index(cur) if cur in SWATCH_NAMES else 0
@@ -1340,7 +1359,12 @@ class WizardOverlay:
         self.reader.update()
 
     def _apply(self, key: str, val):
-        """Apply live — book overrides go to history, app keys go to config."""
+        """Apply live — bookmeta goes to history, book overrides go to history, app keys go to config."""
+        # bookmeta fields — write via history.set_meta
+        if key.startswith("__meta_") and self.reader.document:
+            field = key.replace("__meta_", "").replace("__", "")
+            self.reader.history.set_meta(self.reader.document.filepath, field, str(val))
+            return
         step_kind = self._step_kind(self.idx)
         if step_kind == "book" and self.reader.document and key != "zoom_mode":
             fp = self.reader.document.filepath
@@ -1626,8 +1650,12 @@ class WizardOverlay:
     def _get_val_for(self, idx: int):
         """Get current value for step at index idx."""
         key  = self.steps[idx][0]
-        # In combined mode, BOOK_STEPS entries read from book overrides if a doc is open
         kind = self._step_kind(idx)
+        # bookmeta keys read from history entry directly
+        if key.startswith("__meta_") and self.reader.document:
+            field = key.replace("__meta_", "").replace("__", "")
+            e = self.reader.history._entry(self.reader.document.filepath)
+            return e.get(field, "")
         if kind == "book" and self.reader.document:
             e  = self.reader.history._entry(self.reader.document.filepath)
             ov = e.get("config_overrides", {})
@@ -1656,10 +1684,9 @@ class WizardOverlay:
         if typ == "bool":     return "ON" if cur else "OFF"
         if typ == "color":    return str(cur or "#ffb000")
         if typ == "choice":   return str(cur or (choices[0] if choices else ""))
-        if typ in ("text", "path"):
+        if typ in ("text", "path", "bookmeta"):
             s = str(cur or "")
             if not s: return "(not set)"
-            # Mask API keys — show first 4 + *** + last 4
             if key == "translate_api_key" and len(s) > 8:
                 return s[:4] + "·" * min(12, len(s) - 8) + s[-4:]
             return s
@@ -2395,24 +2422,24 @@ class ReaderWidget(QWidget):
                           for h in e.get("highlights", []))
             has_an  = any(a.get("line") == cur_line for a in e.get("audio_notes", []))
 
-            x = _draw_btn("add_bm",    "+BM",    x, active=has_bm)
-            x = _draw_btn("rem_bm",    "-BM",    x, danger=has_bm)
+            x = _draw_btn("add_bm",    "Bookmark",      x, active=has_bm)
+            x = _draw_btn("rem_bm",    "- Bookmark",    x, danger=has_bm)
             x += 3
-            x = _draw_btn("add_note",  "+NOTE",  x, active=has_note)
-            x = _draw_btn("rem_note",  "-NOTE",  x, danger=has_note)
+            x = _draw_btn("add_note",  "Note",          x, active=has_note)
+            x = _draw_btn("rem_note",  "- Note",        x, danger=has_note)
             x += 3
-            x = _draw_btn("add_audio", "+AUDIO", x, active=has_an)
-            x = _draw_btn("rem_audio", "-AUDIO", x, danger=has_an)
+            x = _draw_btn("add_audio", "Audio",         x, active=has_an)
+            x = _draw_btn("rem_audio", "- Audio",       x, danger=has_an)
             x += 3
-            x = _draw_btn("add_hl",    "+HL",    x, active=has_hl)
-            x = _draw_btn("rem_hl",    "-HL",    x, danger=has_hl)
+            x = _draw_btn("add_hl",    "Highlight",     x, active=has_hl)
+            x = _draw_btn("rem_hl",    "- Highlight",   x, danger=has_hl)
             x += 8
 
             # Invert toggle
             inv  = bool(_pdf_invert_ref[0])
-            x = _draw_btn("invert", "INVERT", x, active=inv)
+            x = _draw_btn("invert", "Invert", x, active=inv)
             x += 3
-            x = _draw_btn("search", "SEARCH", x)
+            x = _draw_btn("search", "Search", x)
             x += 8
         else:
             painter.setPen(AMBER_DIM)
@@ -3367,7 +3394,7 @@ class ReaderWidget(QWidget):
                     elif key_name in ("__loadtheme__", "__savetheme__"):
                         wz.start_text_edit()
                         return
-                elif typ in ("text", "path"):
+                elif typ in ("text", "path", "bookmeta"):
                     wz.start_text_edit()
                 else:
                     wz._nav(1); self.update()
@@ -3812,7 +3839,7 @@ class ReaderWidget(QWidget):
                 # ff — open command bar pre-filled with sn
                 self._f_pending = False
                 self._enter_command_mode()
-                self.cmd.setText(":sn ")
+                self.cmd.setText(":fn ")
                 self.cmd.setCursorPosition(len(self.cmd.text()))
             else:
                 # f — repeat last search
@@ -3834,7 +3861,7 @@ class ReaderWidget(QWidget):
         if not self._f_pending: return
         self._f_pending = False
         last = getattr(self, '_last_command', '')
-        if last and last[:2] in ("sn", "sp", "sf", "sl"):
+        if last and last[:2] in ("fn", "fp", "ff", "fl"):
             result = self._run(last)
             if result:
                 self.status_text = result
@@ -3898,7 +3925,7 @@ class ReaderWidget(QWidget):
                     return
 
             # Annotation panel click-to-jump
-            if self.panel:
+            if self.panel and self.document:
                 for rect, line_idx in self._panel_rects:
                     if rect.contains(pos):
                         self.panel = None
@@ -3946,7 +3973,7 @@ class ReaderWidget(QWidget):
             self.update(); return
         if name == "search":
             self._enter_command_mode()
-            self.cmd.setText(":sn ")
+            self.cmd.setText(":fn ")
             self.cmd.setCursorPosition(len(self.cmd.text()))
             return
         if not self.document: return
@@ -3971,11 +3998,11 @@ class ReaderWidget(QWidget):
         if len(parts) < 2: self.update(); return
         which, key = parts[0], parts[1]
 
-        if which == "metar":
-            if key == "bookmarks":   self._open_annot_panel("bookmarks")
-            elif key == "notes":     self._open_annot_panel("notes")
-            elif key == "highlights":self._open_annot_panel("highlights")
-            elif key == "audio":     self._open_annot_panel("audionotes")
+        if which == "metar" and self.document:
+            if key == "bookmarks":    self._open_annot_panel("bookmarks")
+            elif key == "notes":      self._open_annot_panel("notes")
+            elif key == "highlights": self._open_annot_panel("highlights")
+            elif key == "audio":      self._open_annot_panel("audionotes")
         elif which == "menu":
             if key == "library":     self.window().show_library()
             elif key == "settings":  self._open_settings_wizard()
@@ -5113,7 +5140,7 @@ class ReaderWidget(QWidget):
 
     # Command aliases — short forms expand to full commands before processing
     CMD_ALIASES = {
-        "bs":   "bookset",
+        "bs":   "setbook",
         "setm": "setmeta",
         "bi":   "bookinfo",
         "sc":   "showconfig",
@@ -5210,12 +5237,14 @@ class ReaderWidget(QWidget):
         if cmd in ("help","man","?"):        return self._open_panel("ScrollReader — Command Reference", "help")
 
         # Search commands
-        if cmd in ("sn","sp","sf","sl"):
-            if len(parts) < 2: return "usage: sn/sp/sf/sl <term> or ;;phrase;;"
+        if cmd in ("fn","fp","ff","fl"):
+            if len(parts) < 2: return "usage: fn/fp/ff/fl <term> or ;;phrase;;"
             raw = " ".join(parts[1:])
             m = re.search(r';;(.*?);;', raw)
             term = m.group(1) if m else raw.strip()
-            result = self._do_search(term, cmd)
+            # Map fn→sn direction for _do_search
+            dir_map = {"fn": "sn", "fp": "sp", "ff": "sf", "fl": "sl"}
+            result = self._do_search(term, dir_map[cmd])
             self._last_command = text
             return result
 
@@ -5226,11 +5255,11 @@ class ReaderWidget(QWidget):
         if cmd == "set":
             if len(parts) < 3: return "usage: set <key> <value>"
             return self.config.set(parts[1], parts[2])
-        if cmd == "bookset":
-            if len(parts) < 3 or not self.document: return "usage: bookset <key> <value>"
+        if cmd in ("setbook", "bookset"):
+            if len(parts) < 3 or not self.document: return "usage: setbook <key> <value>"
             return self.history.set_override(self.document.filepath, parts[1], parts[2])
         if cmd == "showconfig":  return "  ".join(f"{k}={v}" for k,v in self.config.data.items())
-        if cmd == "bookinfo":
+        if cmd in ("metainfo", "bookinfo"):
             if not self.document: return "no document open"
             return self.history.summary(self.document.filepath)
         if cmd in ("setmeta", "setm"):
