@@ -286,6 +286,7 @@ BOTTOM_BAR_H = 28   # bottom controls/command bar
 L_MARGIN     = 0    # no left margin
 R_MARGIN     = 0    # no right margin (legacy, kept for compat)
 PANEL_W      = 160  # single margin width (reading + panel mode)
+MARGIN_COLLAPSED_W = 50   # collapsed margin strip width
 BORDER_W     = 2    # default border width
 APP_DIR      = Path.home() / ".scrollreader"
 CONFIG_PATH  = APP_DIR / "config.json"
@@ -342,7 +343,10 @@ DEFAULT_CONFIG = {
     "wizard_completed":      False,         # True after first-run wizard is done
     "max_cached_pages":      300,           # sliding render window size (0 = unlimited)
     "max_cache_mb":          0,             # RAM cap in MB (0 = use page count only)
-    "translate_provider":    "anthropic",   # anthropic | google | google_official | openai | ollama
+    "mark_color_bookmark":   "#ffb000",
+    "mark_color_note":       "#00bbff",
+    "mark_color_audio":      "#bb44ff",
+    "margin_collapsed_w":    50,   # anthropic | google | google_official | openai | ollama
     "translate_api_key":     "",            # API key for anthropic/google_official/openai
     "translate_target_lang": "es",          # default translation target language
     "ui_language":           "english",     # preferred UI/reading language
@@ -1665,6 +1669,15 @@ class ReaderWidget(QWidget):
         # New state
         self._line_history:  list[int] = []   # movement undo stack (max 50)
         self._panel_mode: Optional[str] = None  # 'bookmarks'/'notes'/'highlights'
+
+        # Collapsible margin state
+        self._margin_w:         int  = MARGIN_COLLAPSED_W
+        self._margin_key_held:  bool = False
+        self._margin_hover:     bool = False
+        self._margin_anim_w:    int  = MARGIN_COLLAPSED_W  # current animated width
+        self._margin_anim_timer = QTimer(self)
+        self._margin_anim_timer.timeout.connect(self._margin_anim_tick)
+        self._margin_anim_timer.start(30)  # ~33fps for snappy animation
         self._panel_cursor: int        = 0
         self._pre_panel_line: int      = 0
         self._search_term: str         = ''
@@ -1673,7 +1686,7 @@ class ReaderWidget(QWidget):
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(600, 400)
-        self.setMouseTracking(False)
+        self.setMouseTracking(True)
 
         self._cmd_cooldown = 0.0
 
@@ -2085,11 +2098,8 @@ class ReaderWidget(QWidget):
 
     def _page_x_offset(self):
         if not self.document: return 0
-        side   = self._margin_side()
-        area_x = PANEL_W if side == "left" else 0
-        area_w = _SCREEN_WIDTH_ref[0] - PANEL_W
-        # Center page within reading area; page may extend slightly into margin
-        return area_x + max(0, (area_w - self.document.max_width) // 2)
+        # Center page on full screen width — margin overlays on top, no offset needed
+        return max(0, (_SCREEN_WIDTH_ref[0] - self.document.max_width) // 2)
 
     def _lines_per_screen(self):
         if not self.document or not self.document.lines: return 10
@@ -2208,6 +2218,44 @@ class ReaderWidget(QWidget):
         ind_col = QColor(self._cfg("indicator_color") or "#ffb000")
         ind_col.setAlpha(int(self._cfg("highlight_alpha") or 35))
         painter.fillRect(QRect(px, ind_y-2, self.document.max_width, lh), ind_col)
+
+        # ── PDF-side annotation bars ───────────────────────────────────────
+        if self.document:
+            e    = self.history._entry(self.document.filepath)
+            mrec = self._margin_rect()
+            side = self._margin_side()
+            pdf_bar_right = mrec.left() if side == "right" else self.width()
+            pdf_bar_left  = mrec.right() if side == "left" else 0
+            pdf_bar_w     = pdf_bar_right - pdf_bar_left if side == "right" else pdf_bar_right
+            page_type_counts_pdf: dict = {}
+            def _pdf_idx(pn, kind):
+                key = (pn, kind)
+                n   = page_type_counts_pdf.get(key, 0)
+                page_type_counts_pdf[key] = n + 1
+                return n
+            all_pdf_marks = []
+            for bm in e.get("bookmarks", []):
+                all_pdf_marks.append(("bookmark", bm.get("line",0), bm.get("note","")))
+            for nn in e.get("notes", []):
+                all_pdf_marks.append(("note", nn.get("line",0), nn.get("note","")))
+            for hh in e.get("highlights", []):
+                all_pdf_marks.append(("highlight", hh.get("start_line",0), ""))
+            for an in e.get("audio_notes", []):
+                all_pdf_marks.append(("audio", an.get("line",0), ""))
+            for kind, line, _ in all_pdf_marks:
+                if line >= total: continue
+                ay  = vp.y() + self.document.page_offsets[dlines[line].page_num if line < total else 0] - scroll
+                # Use per-line y from scroll
+                ay  = self._margin_indicator_y(line, scroll, voff, vp)
+                if ay + lh < vp.top() or ay > vp.bottom(): continue
+                pn  = dlines[line].page_num if line < total else 0
+                idx = _pdf_idx(pn, kind)
+                col = self._mark_color(kind, idx)
+                col.setAlpha(60)  # semi-transparent on PDF
+                # Full width from left edge of PDF area to margin edge
+                bar_x = int(px)
+                bar_w = abs(mrec.left() - int(px)) if side == "right" else abs(mrec.right() - int(px))
+                painter.fillRect(QRect(bar_x, ay, bar_w, max(2, lh)), col)
 
         # ── Margins ────────────────────────────────────────────────────────
         self._paint_margin(painter, scroll, voff, vp, dlines, total, lh, ind_y)
@@ -2369,14 +2417,47 @@ class ReaderWidget(QWidget):
 
     # ── Single margin (reading indicators + panel mode) ───────────────────
 
+    def _margin_should_expand(self) -> bool:
+        """Return True if any expansion trigger is active."""
+        return (self._margin_key_held or
+                self._margin_hover or
+                bool(self._panel_mode) or
+                bool(self._ai_chip_mode) or
+                getattr(self, '_search_panel_active', False))
+
+    def _margin_anim_tick(self):
+        target = PANEL_W if self._margin_should_expand() else int(self.config.get("margin_collapsed_w") or MARGIN_COLLAPSED_W)
+        if self._margin_anim_w == target: return
+        step = max(1, abs(target - self._margin_anim_w) // 2 + 1)
+        if self._margin_anim_w < target:
+            self._margin_anim_w = min(target, self._margin_anim_w + step * 4)
+        else:
+            self._margin_anim_w = max(target, self._margin_anim_w - step * 4)
+        self.update()
+
+    def _mark_color(self, kind: str, index_on_page: int = 0) -> QColor:
+        """Return the color for a mark type with per-page HSV variation."""
+        base_hex = {
+            "bookmark":  self.config.get("mark_color_bookmark") or "#ffb000",
+            "highlight": self._cfg("indicator_color") or "#ffb000",
+            "note":      self.config.get("mark_color_note") or "#00bbff",
+            "audio":     self.config.get("mark_color_audio") or "#bb44ff",
+        }.get(kind, "#ffb000")
+        c = QColor(base_hex)
+        if index_on_page > 0:
+            h, s, v, a = c.hsvHueF(), c.saturationF(), c.valueF(), c.alphaF()
+            h = (h + index_on_page * 0.042) % 1.0  # ~15° per step
+            c = QColor.fromHsvF(min(h, 1.0), s, v, a)
+        return c
+
     def _margin_rect(self) -> QRect:
         side = self._margin_side()
-        x = 0 if side == "right" else 0
+        mw   = self._margin_anim_w
         if side == "left":
             x = 0
         else:
-            x = self.width() - PANEL_W
-        return QRect(x, TOP_BAR_H, PANEL_W,
+            x = self.width() - mw
+        return QRect(x, TOP_BAR_H, mw,
                      self.height() - TOP_BAR_H - BOTTOM_BAR_H)
 
     def _paint_margin(self, painter, scroll, voff, vp, dlines, total, lh, ind_y):
@@ -2410,16 +2491,102 @@ class ReaderWidget(QWidget):
 
     def _paint_margin_reading(self, painter, mr, scroll, voff, vp,
                                dlines, total, lh, ind_y, e, side):
-        """Reading mode: small indicators + annotation text."""
-        IND_W   = 12
-        TEXT_X  = mr.left() + IND_W + 6 if side == "right" else mr.left() + 6
-        TEXT_W  = PANEL_W - IND_W - 10
-        font    = _ui_font(8)
-        fm      = QFontMetrics(font)
+        """Reading mode: annotation bars + minimap + text (expanded only)."""
+        mw       = mr.width()
+        expanded = mw > int(self.config.get("margin_collapsed_w") or MARGIN_COLLAPSED_W) + 10
+        font     = _ui_font(8)
+        fm       = QFontMetrics(font)
         painter.setFont(font)
-        ind_color = QColor(self._cfg("indicator_color") or "#ffb000")
 
-        # Current line indicator triangle
+        # ── 1. Minimap — 1px lines for ALL annotations (proportional to doc) ──
+        if total > 0:
+            # Count same-type marks per doc-position bucket for splitting
+            all_marks = []
+            for bm in e.get("bookmarks", []):
+                all_marks.append(("bookmark", bm.get("line", 0)))
+            for nn in e.get("notes", []):
+                all_marks.append(("note", nn.get("line", 0)))
+            for hh in e.get("highlights", []):
+                all_marks.append(("highlight", hh.get("start_line", 0)))
+            for an in e.get("audio_notes", []):
+                all_marks.append(("audio", an.get("line", 0)))
+
+            # Group by pixel row
+            from collections import defaultdict
+            row_marks = defaultdict(list)
+            for kind, line in all_marks:
+                if line >= total: continue
+                frac = line / total
+                py   = mr.top() + int(frac * mr.height())
+                row_marks[py].append(kind)
+
+            for py, kinds in row_marks.items():
+                n    = len(kinds)
+                segw = max(1, mw // n)
+                for i, kind in enumerate(kinds):
+                    col = self._mark_color(kind, 0)
+                    col.setAlpha(180)
+                    painter.fillRect(QRect(mr.left() + i * segw, py, segw, 1), col)
+
+        # ── 2. Visible annotation bars ─────────────────────────────────────
+        # Build page-local index for color variation
+        page_type_counts: dict = {}
+        def _next_idx(page_num, kind):
+            key = (page_num, kind)
+            n   = page_type_counts.get(key, 0)
+            page_type_counts[key] = n + 1
+            return n
+
+        # Collect visible marks
+        vis_marks = []
+        for bm in e.get("bookmarks", []):
+            line = bm.get("line", 0)
+            if line >= total: continue
+            ay = self._margin_indicator_y(line, scroll, voff, vp)
+            if vp.top() - lh <= ay <= vp.bottom():
+                pn = dlines[line].page_num if line < total else 0
+                vis_marks.append(("bookmark", ay, line, pn, bm.get("note", "")))
+        for nn in e.get("notes", []):
+            line = nn.get("line", 0)
+            if line >= total: continue
+            ay = self._margin_indicator_y(line, scroll, voff, vp)
+            if vp.top() - lh <= ay <= vp.bottom():
+                pn = dlines[line].page_num if line < total else 0
+                vis_marks.append(("note", ay, line, pn, nn.get("note", "")))
+        for hh in e.get("highlights", []):
+            sl = hh.get("start_line", 0)
+            if sl >= total: continue
+            ay = self._margin_indicator_y(sl, scroll, voff, vp)
+            if vp.top() - lh <= ay <= vp.bottom():
+                pn = dlines[sl].page_num if sl < total else 0
+                vis_marks.append(("highlight", ay, sl, pn, hh.get("note", "")))
+        for an in e.get("audio_notes", []):
+            line = an.get("line", 0)
+            if line >= total: continue
+            ay = self._margin_indicator_y(line, scroll, voff, vp)
+            if vp.top() - lh <= ay <= vp.bottom():
+                pn = dlines[line].page_num if line < total else 0
+                vis_marks.append(("audio", ay, line, pn, "♪"))
+
+        vis_marks.sort(key=lambda x: x[1])
+
+        for kind, ay, line, pn, note in vis_marks:
+            idx   = _next_idx(pn, kind)
+            col   = self._mark_color(kind, idx)
+            col.setAlpha(200)
+            # Opaque bar in margin (same height as lh, aligned with PDF bar)
+            painter.fillRect(QRect(mr.left(), ay, mw, max(2, lh)), col)
+
+            # Text label — expanded only
+            if expanded and note:
+                text_x = mr.left() + 6
+                text_w = mw - 10
+                truncated = fm.elidedText(str(note), Qt.TextElideMode.ElideRight, text_w)
+                painter.setPen(UI_BG if col.lightness() > 100 else AMBER_BRIGHT)
+                painter.drawText(text_x, ay + lh - 3, truncated)
+
+        # ── 3. Current line indicator triangle ─────────────────────────────
+        ind_color = QColor(self._cfg("indicator_color") or "#ffb000")
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(ind_color)
         ty = ind_y + lh // 2
@@ -2434,94 +2601,6 @@ class ReaderWidget(QWidget):
             painter.drawPolygon(QPolygon([
                 QPoint(tx, ty-sz//2), QPoint(tx, ty+sz//2), QPoint(tx+sz, ty)
             ]))
-
-        # Collect all visible annotations sorted by Y position
-        items = []
-        for bm in e.get("bookmarks", []):
-            line = bm.get("line", 0)
-            if line >= total: continue
-            ay = self._margin_indicator_y(line, scroll, voff, vp)
-            if vp.top() <= ay <= vp.bottom():
-                items.append(("bookmark", ay, line, bm.get("note", "")))
-
-        for nn in e.get("notes", []):
-            line = nn.get("line", 0)
-            if line >= total: continue
-            ay = self._margin_indicator_y(line, scroll, voff, vp)
-            if vp.top() <= ay <= vp.bottom():
-                items.append(("note", ay, line, nn.get("note", "")))
-
-        for hh in e.get("highlights", []):
-            sl = hh.get("start_line", 0)
-            if sl >= total: continue
-            ay = self._margin_indicator_y(sl, scroll, voff, vp)
-            if vp.top() <= ay <= vp.bottom():
-                items.append(("highlight", ay, sl, hh.get("note", "")))
-
-        # Annotation text — word-wrap notes, truncate bookmarks/highlights
-        items.sort(key=lambda x: x[1])
-        last_y = -999
-        for kind, ay, line, note in items:
-            # Small indicator symbol
-            painter.setPen(Qt.PenStyle.NoPen)
-            if kind == "bookmark":
-                painter.setBrush(AMBER)
-                if side == "right":
-                    painter.drawPolygon(QPolygon([
-                        QPoint(mr.left()+2, ay+lh//2),
-                        QPoint(mr.left()+IND_W-2, ay+2),
-                        QPoint(mr.left()+IND_W-2, ay+lh-2)
-                    ]))
-                else:
-                    painter.drawPolygon(QPolygon([
-                        QPoint(mr.right()-2, ay+lh//2),
-                        QPoint(mr.left()+2, ay+2),
-                        QPoint(mr.left()+2, ay+lh-2)
-                    ]))
-            elif kind == "note":
-                painter.setPen(AMBER_DIM)
-                painter.setBrush(AMBER_DARK)
-                painter.drawRect(QRect(mr.left()+2, ay+lh//2-5, 9, 9))
-                painter.setPen(Qt.PenStyle.NoPen)
-            else:
-                painter.fillRect(QRect(mr.left()+2, ay, 4, max(2, lh)), AMBER_DIM)
-
-            # Note text — word wrap within available space
-            if note and ay > last_y + 4:
-                painter.setPen(AMBER_DIM)
-                painter.setFont(font)
-                if kind == "note":
-                    # Word-wrap for notes
-                    words = note.split()
-                    cur_line = ""; ty = ay + lh
-                    for word in words:
-                        test = (cur_line + " " + word).strip()
-                        if fm.horizontalAdvance(test) <= TEXT_W:
-                            cur_line = test
-                        else:
-                            if cur_line:
-                                painter.drawText(TEXT_X, ty, cur_line)
-                                ty += fm.height() + 1
-                            cur_line = word
-                        if ty > vp.bottom(): break
-                    if cur_line and ty <= vp.bottom():
-                        painter.drawText(TEXT_X, ty, cur_line)
-                    last_y = ty
-                else:
-                    truncated = fm.elidedText(note, Qt.TextElideMode.ElideRight, TEXT_W)
-                    painter.drawText(TEXT_X, ay + lh - 3, truncated)
-                    last_y = ay + lh
-
-        # Highlight bars (thin vertical strip)
-        painter.setPen(Qt.PenStyle.NoPen)
-        for hh in e.get("highlights", []):
-            sl, el = hh.get("start_line",0), hh.get("end_line",0)
-            if sl >= total or el >= total: continue
-            sy = self._margin_indicator_y(sl, scroll, voff, vp)
-            ey = self._margin_indicator_y(el, scroll, voff, vp) + lh
-            if ey >= vp.top() and sy <= vp.bottom():
-                hx = mr.left() + 6
-                painter.fillRect(QRect(hx, sy, 3, max(2, ey-sy)), AMBER_DIM)
 
     def _paint_panel_list(self, painter, mr, e, lh):
         """Panel mode: scrollable annotation list."""
@@ -3464,8 +3543,10 @@ class ReaderWidget(QWidget):
                 self.update()
         elif k == Qt.Key.Key_J:
             self._open_search_panel()
-        elif k == Qt.Key.Key_Slash:
-            self._open_panel("ScrollReader — Command Reference", "help")
+        elif k == Qt.Key.Key_Backslash:
+            self._margin_key_held = True
+            self.update()
+            return
         elif k == Qt.Key.Key_Question:
             self._open_settings_wizard()
         elif k == Qt.Key.Key_G:
@@ -3507,6 +3588,24 @@ class ReaderWidget(QWidget):
     def focusOutEvent(self, ev):
         self._g_pending = False
         super().focusOutEvent(ev)
+
+    def keyReleaseEvent(self, ev):
+        if ev.key() == Qt.Key.Key_Backslash:
+            self._margin_key_held = False
+        super().keyReleaseEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        pos  = ev.pos()
+        mr   = self._margin_rect()
+        side = self._margin_side()
+        near = pos.x() >= mr.left() - 10 if side == "right" else pos.x() <= mr.right() + 10
+        if near != self._margin_hover:
+            self._margin_hover = near
+        super().mouseMoveEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._margin_hover = False
+        super().leaveEvent(ev)
 
     def wheelEvent(self, ev: QWheelEvent):
         delta = ev.angleDelta().y()
@@ -4401,6 +4500,68 @@ class ReaderWidget(QWidget):
         # combined and app: stay at current position, no preview jump
         self.update()
 
+    def _themes_dir(self) -> 'Path':
+        from pathlib import Path
+        d = Path(_app_dir()) / "themes"
+        d.mkdir(exist_ok=True)
+        return d
+
+    def _save_theme(self, name: str) -> str:
+        import json
+        THEME_KEYS = [
+            "current_swatch", "current_font_idx", "ui_font_offset",
+            "top_bar_h", "bottom_bar_h", "panel_w", "ui_border_width",
+            "margin_side", "margin_collapsed_w",
+            "mark_color_bookmark", "mark_color_note", "mark_color_audio",
+            "indicator_color", "translate_provider",
+        ]
+        data = {"schema": "scrollreader-theme-v1", "name": name}
+        for k in THEME_KEYS:
+            v = self.config.get(k)
+            if v is not None:
+                data[k] = v
+        p = self._themes_dir() / f"{name}.json"
+        p.write_text(json.dumps(data, indent=2))
+        return f"theme saved: {p.name}"
+
+    def _load_theme(self, name: str) -> str:
+        import json
+        # Accept with or without .json extension
+        d = self._themes_dir()
+        p = d / f"{name}.json" if not name.endswith(".json") else d / name
+        if not p.exists():
+            return f"theme not found: {name}"
+        try:
+            data = json.loads(p.read_text())
+        except Exception as ex:
+            return f"theme load error: {ex}"
+        global TOP_BAR_H, BOTTOM_BAR_H, PANEL_W
+        for k, v in data.items():
+            if k in ("schema", "name"): continue
+            self.config.set(k, v)
+            if k == "top_bar_h":       TOP_BAR_H    = int(v)
+            elif k == "bottom_bar_h":  BOTTOM_BAR_H = int(v)
+            elif k == "panel_w":       PANEL_W      = int(v)
+            elif k == "ui_font_offset":
+                _UI_FONT_OFFSET_ref[0] = int(v)
+                self._update_cmd_style()
+            elif k == "current_font_idx":
+                fonts = _scan_fonts()
+                idx   = int(v)
+                if fonts and 0 <= idx < len(fonts):
+                    _UI_FONT_FAMILY_ref[0] = _load_font_by_path(fonts[idx]) or _UI_FONT_FAMILY_ref[0]
+        self.update()
+        return f"theme loaded: {data.get('name', name)}"
+
+    def _list_themes(self) -> Optional[str]:
+        themes = sorted(self._themes_dir().glob("*.json"))
+        if not themes:
+            return "no themes found — use :savetheme <name> to create one"
+        names  = [p.stem for p in themes]
+        self._open_panel("Themes", "help")
+        self.status_text = "  ".join(names)
+        return None
+
     def _open_settings_wizard(self):
         """Smart settings opener: combined wizard if a doc is open, app-only otherwise."""
         mw = self.window()
@@ -4525,6 +4686,15 @@ class ReaderWidget(QWidget):
         if cmd in ("bookwizard", "bwizard", "pdfsettings", "booksettings", "pdfsetting"):
             if not self.document: return "no document open"
             self._open_wizard("book"); return None
+        if cmd in ("savetheme",):
+            if len(parts) < 2: return "usage: savetheme <name>"
+            return self._save_theme(parts[1])
+        if cmd in ("loadtheme",):
+            if len(parts) < 2: return "usage: loadtheme <name>"
+            return self._load_theme(parts[1])
+        if cmd in ("themes",):
+            return self._list_themes()
+
         if cmd in ("settings",):
             self._open_settings_wizard(); return None
         if cmd in ("help","man","?"):        return self._open_panel("ScrollReader — Command Reference", "help")
