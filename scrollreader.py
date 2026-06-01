@@ -330,7 +330,7 @@ DEFAULT_CONFIG = {
     "current_font_idx":      -1,             # -1 = not set, resolved to IBM PS-55 at startup
     "preload_inverted":      True,
     "start_fullscreen":      True,
-    "top_bar_h":             30,
+    "top_bar_h":             40,
     "bottom_bar_h":          30,
     "panel_w":               160,
     "reference_dir":         None,
@@ -1689,6 +1689,12 @@ class ReaderWidget(QWidget):
         self._line_history:  list[int] = []   # movement undo stack (max 50)
         self._panel_mode: Optional[str] = None  # 'bookmarks'/'notes'/'highlights'
 
+        # Top bar button/dropdown state
+        self._top_btn_rects:  dict = {}   # name → QRect
+        self._top_dropdown:   Optional[str] = None  # "metar" | "menu" | None
+        self._top_dd_rects:   dict = {}   # dropdown item name → QRect
+        self._top_dd_hover:   Optional[str] = None
+
         # Collapsible margin state
         self._margin_w:         int  = MARGIN_COLLAPSED_W
         self._margin_key_held:  bool = False
@@ -2342,103 +2348,246 @@ class ReaderWidget(QWidget):
         painter.drawRect(QRect(bw, bw, w-bw*2-1, h-bw*2-1))
 
     def _paint_top_bar(self, painter: QPainter):
-        w = self.width()
-        painter.fillRect(QRect(0, 0, w, TOP_BAR_H), UI_BG)
-        painter.setPen(_mk_pen(AMBER_DARK, self._bw()))
-        painter.drawLine(0, TOP_BAR_H-1, w, TOP_BAR_H-1)
+        w    = self.width()
+        h    = TOP_BAR_H
+        font = _ui_font(9, bold=True)
+        fm   = QFontMetrics(font)
+        bw   = self._bw()
 
-        font_b = _ui_font(9, bold=True)
-        font   = _ui_font(9)
-        ty     = TOP_BAR_H - 8
-
-        # Close button — smaller than full bar height, flush top-right, centered vertically
-        btn_sz = max(12, TOP_BAR_H - 8)
-        btn_y  = (TOP_BAR_H - btn_sz) // 2
-        btn_x  = w - btn_sz - 2
-        self._close_btn_rect = QRect(btn_x, btn_y, btn_sz, btn_sz)
-        bw = self._bw()
+        painter.fillRect(QRect(0, 0, w, h), UI_BG)
         painter.setPen(_mk_pen(AMBER_DARK, bw))
-        painter.drawRect(self._close_btn_rect)
-        painter.setFont(_ui_font(10, bold=True))
-        painter.setPen(AMBER_DIM)
-        painter.drawText(self._close_btn_rect, Qt.AlignmentFlag.AlignCenter, "×")
-        ty     = TOP_BAR_H - 8
+        painter.drawLine(0, h-1, w, h-1)
 
-        if self.document and self.document.lines:
-            line  = self.document.lines[self.current_line]
-            total = len(self.document.lines)
-            left_txt = (f"LINE {self.current_line+1}/{total}"
-                        f"  PAGE {line.page_num+1}/{self.document.page_count}"
-                        f"  {self._metar()}")
-            painter.setPen(AMBER)
-            painter.setFont(font_b)
-            painter.drawText(L_MARGIN + 6, ty, left_txt)
+        PAD  = 6
+        BTN_H = h - 6
+        BTN_Y = 3
 
-            e       = self.history._entry(self.document.filepath)
-            title   = (e.get("title") or Path(self.document.filepath).stem)[:28]
-            author  = (e.get("author") or "")[:20]
-            centre_txt = f"{title}{',  '+author if author else ''}"
-            painter.setPen(AMBER_BRIGHT)
-            painter.setFont(font_b)
-            fm  = QFontMetrics(font_b)
-            cx  = (w - fm.horizontalAdvance(centre_txt)) // 2
-            painter.drawText(cx, ty, centre_txt)
-
-            # Right side: MODE label, then search input if active
-            mode_map = {None: "READING", "bookmarks": "BOOKMARK VIEW",
-                        "notes": "NOTE VIEW", "highlights": "HIGHLIGHT VIEW",
-                        "audionotes": "AUDIO NOTE VIEW"}
-            if getattr(self, '_search_panel_active', False):
-                mode_txt = "SEARCH VIEW MODE"
-            else:
-                mode_txt = mode_map.get(self._panel_mode, "READING") + " MODE"
-
-            right_x = (w - PANEL_W - fm.horizontalAdvance(mode_txt) - 8
-                       if self._margin_side() == "right" else PANEL_W + 8)
-            painter.setPen(AMBER_DIM)
+        def _draw_btn(name: str, label: str, x: int,
+                      active: bool = False, danger: bool = False) -> int:
+            bw2   = fm.horizontalAdvance(label) + PAD * 2
+            r     = QRect(x, BTN_Y, bw2, BTN_H)
+            self._top_btn_rects[name] = r
+            col   = AMBER_BRIGHT if active else (QColor("#ff6666") if danger else AMBER_DIM)
+            bg    = QColor(col.red(), col.green(), col.blue(), 40 if active else 0)
+            if bg.alpha(): painter.fillRect(r, bg)
+            painter.setPen(_mk_pen(col, bw))
+            painter.drawRect(r)
             painter.setFont(font)
-            painter.drawText(right_x, ty, mode_txt)
+            painter.setPen(col)
+            painter.drawText(r, Qt.AlignmentFlag.AlignCenter, label)
+            return x + bw2 + 3
 
-            # Search input — shown right after mode text when search active
-            if getattr(self, '_search_panel_active', False):
-                query    = getattr(self, '_search_query', "")
-                q_active = getattr(self, '_search_input_active', False)
-                q_txt    = f"  /{query}{'_' if q_active else ''}"
-                q_x      = right_x + QFontMetrics(font).horizontalAdvance(mode_txt) + 12
-                painter.setPen(AMBER_BRIGHT if q_active else AMBER_DIM)
-                painter.setFont(font_b)
-                painter.drawText(q_x, ty, q_txt)
+        x = PAD
+
+        # METAR dropdown button — shows METAR code, expands to human-readable
+        if self.document:
+            metar_code = "NOBOOK" if not self.document else self._metar()
+            x = _draw_btn("metar", metar_code,  x,
+                          active=self._top_dropdown == "metar")
+            x += 4
+
+            # Annotation buttons
+            e = self.history._entry(self.document.filepath)
+            cur_line = self.current_line
+            has_bm  = any(b.get("line") == cur_line for b in e.get("bookmarks", []))
+            has_note= any(n.get("line") == cur_line for n in e.get("notes", []))
+            has_hl  = any(h.get("start_line") <= cur_line <= h.get("end_line", cur_line)
+                          for h in e.get("highlights", []))
+            has_an  = any(a.get("line") == cur_line for a in e.get("audio_notes", []))
+
+            x = _draw_btn("add_bm",    "+BM",    x, active=has_bm)
+            x = _draw_btn("rem_bm",    "-BM",    x, danger=has_bm)
+            x += 3
+            x = _draw_btn("add_note",  "+NOTE",  x, active=has_note)
+            x = _draw_btn("rem_note",  "-NOTE",  x, danger=has_note)
+            x += 3
+            x = _draw_btn("add_audio", "+AUDIO", x, active=has_an)
+            x = _draw_btn("rem_audio", "-AUDIO", x, danger=has_an)
+            x += 3
+            x = _draw_btn("add_hl",    "+HL",    x, active=has_hl)
+            x = _draw_btn("rem_hl",    "-HL",    x, danger=has_hl)
+            x += 8
+
+            # Invert toggle
+            inv  = bool(_pdf_invert_ref[0])
+            x = _draw_btn("invert", "INVERT", x, active=inv)
+            x += 3
+            x = _draw_btn("search", "SEARCH", x)
+            x += 8
         else:
             painter.setPen(AMBER_DIM)
-            painter.setFont(font_b)
-            painter.drawText(L_MARGIN + 6, ty, "SCROLLREADER")
+            painter.setFont(font)
+            painter.drawText(PAD + 4, h - 8, "SCROLLREADER")
+
+        # MENU dropdown — right-aligned before close
+        close_w = BTN_H + 4
+        menu_x  = w - close_w - 3 - (fm.horizontalAdvance("MENU") + PAD*2) - 3
+        _draw_btn("menu", "MENU", menu_x,
+                  active=self._top_dropdown == "menu")
+        # Close button
+        close_r = QRect(w - close_w - 2, BTN_Y, close_w, BTN_H)
+        self._top_btn_rects["close"] = close_r
+        painter.setPen(_mk_pen(AMBER_DARK, bw))
+        painter.drawRect(close_r)
+        painter.setFont(font)
+        painter.setPen(AMBER_DIM)
+        painter.drawText(close_r, Qt.AlignmentFlag.AlignCenter, "×")
+
+        # Draw open dropdown
+        if self._top_dropdown:
+            self._paint_top_dropdown(painter)
+
+    def _paint_top_dropdown(self, painter: QPainter):
+        """Paint the currently open dropdown menu."""
+        which   = self._top_dropdown
+        font_b  = _ui_font(9, bold=True)
+        font    = _ui_font(9)
+        fm      = QFontMetrics(font_b)
+        bw      = self._bw()
+        PAD     = 10
+        ROW_H   = max(22, fm.height() + 8)
+        self._top_dd_rects = {}
+
+        if which == "metar" and self.document:
+            e       = self.history._entry(self.document.filepath)
+            total   = len(self.document.lines)
+            pct     = int(self.current_line / max(total, 1) * 100)
+            n_bm    = len(e.get("bookmarks",   []))
+            n_note  = len(e.get("notes",        []))
+            n_hl    = len(e.get("highlights",   []))
+            n_an    = len(e.get("audio_notes",  []))
+            status  = e.get("status", "unread")
+            rating  = "★" * int(e.get("rating", 0))
+            rows = [
+                ("__header__", self._metar(), None),
+                ("__sep__",    "",            None),
+                ("bookmarks",  f"Bookmarks",  str(n_bm)),
+                ("notes",      f"Notes",      str(n_note)),
+                ("highlights", f"Highlights", str(n_hl)),
+                ("audio",      f"Audio Notes",str(n_an)),
+                ("__sep__",    "",            None),
+                ("__info__",   f"Progress",   f"{pct}%"),
+                ("__info__",   f"Status",     status),
+                ("__info__",   f"Rating",     rating or "—"),
+            ]
+        elif which == "menu":
+            rows = [
+                ("library",    "Library",     "L"),
+                ("settings",   "Settings",    "?"),
+                ("export",     "Export all",  "e"),
+                ("__sep__",    "",            None),
+                ("abandon",    "Abandon",     ""),
+                ("close",      "Close",       "×"),
+            ]
+        else:
+            return
+
+        # Measure width
+        max_label = max((fm.horizontalAdvance(r[1]) for r in rows if r[0] != "__sep__"), default=80)
+        max_val   = max((fm.horizontalAdvance(r[2]) for r in rows if r[2] and r[0] not in ("__sep__","__header__")), default=30)
+        dd_w      = max_label + max_val + PAD * 3 + 20
+        dd_h      = sum(4 if r[0] == "__sep__" else ROW_H for r in rows) + 4
+
+        # Position below the triggering button
+        anchor = self._top_btn_rects.get(which, QRect(0, 0, 0, 0))
+        dd_x   = max(0, min(anchor.left(), self.width() - dd_w - 4))
+        dd_y   = TOP_BAR_H
+
+        # Background + border
+        painter.fillRect(QRect(dd_x, dd_y, dd_w, dd_h), UI_BG)
+        painter.setPen(_mk_pen(AMBER, bw))
+        painter.drawRect(QRect(dd_x, dd_y, dd_w, dd_h))
+
+        cy = dd_y + 2
+        for key, label, val in rows:
+            if key == "__sep__":
+                painter.setPen(_mk_pen(AMBER_DARK, 1))
+                painter.drawLine(dd_x + 4, cy + 2, dd_x + dd_w - 4, cy + 2)
+                cy += 4
+                continue
+
+            row_r = QRect(dd_x, cy, dd_w, ROW_H)
+            is_header = key == "__header__"
+            is_info   = key == "__info__"
+            is_danger = key in ("abandon", "close")
+            is_hover  = self._top_dd_hover == f"{which}:{key}:{label}"
+
+            if not is_header and not is_info:
+                self._top_dd_rects[f"{which}:{key}:{label}"] = row_r
+
+            if is_hover:
+                painter.fillRect(row_r, QColor(AMBER.red(), AMBER.green(), AMBER.blue(), 30))
+
+            col = (AMBER_BRIGHT if is_header else
+                   QColor("#ff6666") if is_danger else
+                   AMBER_DIM if is_info else
+                   AMBER)
+            painter.setFont(font_b if is_header else font)
+            painter.setPen(col)
+            painter.drawText(dd_x + PAD, cy + ROW_H - 7, label)
+            if val is not None:
+                painter.setPen(AMBER_BRIGHT if not is_info else AMBER_DIM)
+                painter.setFont(font_b)
+                vx = dd_x + dd_w - fm.horizontalAdvance(val) - PAD
+                painter.drawText(vx, cy + ROW_H - 7, val)
+            cy += ROW_H
 
     def _paint_bottom_bar(self, painter: QPainter):
         w, h = self.width(), self.height()
         y    = h - BOTTOM_BAR_H
 
         if self.command_mode:
-            # Amber inverse background — cmd QLineEdit widget paints on top
             painter.fillRect(QRect(0, y, w, BOTTOM_BAR_H), AMBER_INV_BG)
         else:
             painter.fillRect(QRect(0, y, w, BOTTOM_BAR_H), UI_BG)
             painter.setPen(_mk_pen(AMBER_DARK, self._bw()))
             painter.drawLine(0, y, w, y)
-            painter.setPen(AMBER_DIM)
-            painter.setFont(_ui_font(8))
+            font_b = _ui_font(9, bold=True)
+            font   = _ui_font(9)
+            fm_b   = QFontMetrics(font_b)
+            ty     = h - 8
 
-            if self._panel_mode:
-                ref = "↑↓ NAVIGATE   SPACE/ENTER SELECT   TAB/ESC BACK"
-            elif self._pending:
-                ref = "Y CONFIRM   N/TAB/ESC CANCEL"
-            elif self.status_text:
-                ref = self.status_text
-            else:
-                ref = ("SPC/↓/S NEXT   ↑/TAB/W BACK   A/D PAGE   "
-                       "L LIB   N/B/H PANELS   R READING   I INVERT   ? HELP   "
-                       "CTRL++ ZOOM IN   CTRL+- ZOOM OUT   CTRL+U/I MIDPOINT   "
-                       "CTRL+K/L SWATCH   CTRL+O/P IND.COLOR   = UNDO")
-            painter.drawText(6, h - 8, ref)
+            if self.document and self.document.lines:
+                line  = self.document.lines[self.current_line]
+                total = len(self.document.lines)
+
+                # Left: line/page position
+                left_txt = f"LINE {self.current_line+1}/{total}  PAGE {line.page_num+1}/{self.document.page_count}"
+                painter.setPen(AMBER)
+                painter.setFont(font_b)
+                painter.drawText(8, ty, left_txt)
+
+                # Centre: title/author
+                e       = self.history._entry(self.document.filepath)
+                title   = (e.get("title") or Path(self.document.filepath).stem)[:32]
+                author  = (e.get("author") or "")[:24]
+                centre_txt = f"{title}{',  '+author if author else ''}"
+                painter.setPen(AMBER_BRIGHT)
+                cx = (w - fm_b.horizontalAdvance(centre_txt)) // 2
+                painter.drawText(cx, ty, centre_txt)
+
+                # Right: mode + status/search
+                mode_map = {None: "READING", "bookmarks": "BOOKMARKS",
+                            "notes": "NOTES", "highlights": "HIGHLIGHTS",
+                            "audionotes": "AUDIO NOTES"}
+                if getattr(self, '_search_panel_active', False):
+                    mode_txt = "SEARCH"
+                    query    = getattr(self, '_search_query', "")
+                    q_active = getattr(self, '_search_input_active', False)
+                    mode_txt += f"  /{query}{'_' if q_active else ''}"
+                else:
+                    mode_txt = mode_map.get(self._panel_mode, "READING")
+
+                painter.setPen(AMBER_DIM)
+                painter.setFont(font)
+                rx = w - QFontMetrics(font).horizontalAdvance(mode_txt) - 10
+                painter.drawText(rx, ty, mode_txt)
+
+            # Status text overlays ref when set
+            if self.status_text:
+                painter.setPen(AMBER_BRIGHT)
+                painter.setFont(font_b)
+                painter.drawText(8, ty, self.status_text)
 
     # ── Margin indicators ─────────────────────────────────────────────────
 
@@ -3582,15 +3731,20 @@ class ReaderWidget(QWidget):
             else:                w.showFullScreen()
             return
 
+        # ── Close dropdown on Esc ────────────────────────────────────────
+        if k == Qt.Key.Key_Escape and self._top_dropdown:
+            self._top_dropdown = None
+            self.update(); return
+
         # ── Normal reading keys ───────────────────────────────────────────
         if k in (Qt.Key.Key_Space, Qt.Key.Key_Return,
                  Qt.Key.Key_Enter, Qt.Key.Key_Down,
                  Qt.Key.Key_S):                          self._step(1)
         elif k in (Qt.Key.Key_Up, Qt.Key.Key_Backspace,
                    Qt.Key.Key_Tab, Qt.Key.Key_W):        self._step(-1)
-        elif k in (Qt.Key.Key_PageDown, Qt.Key.Key_Right,
+        elif k in (Qt.Key.Key_PageDown,
                    Qt.Key.Key_D):   self._step(self._lines_per_screen())
-        elif k in (Qt.Key.Key_PageUp, Qt.Key.Key_Left,
+        elif k in (Qt.Key.Key_PageUp,
                    Qt.Key.Key_A):   self._step(-self._lines_per_screen())
         elif k == Qt.Key.Key_I:
             _pdf_invert_ref[0] = not _pdf_invert_ref[0]
@@ -3679,10 +3833,14 @@ class ReaderWidget(QWidget):
         """300ms after single F — repeat last search if no second F came."""
         if not self._f_pending: return
         self._f_pending = False
-        if self._last_command and self._last_command[:2] in ("sn","sp","sf","sl"):
-            self._run(self._last_command)
+        last = getattr(self, '_last_command', '')
+        if last and last[:2] in ("sn", "sp", "sf", "sl"):
+            result = self._run(last)
+            if result:
+                self.status_text = result
+                QTimer.singleShot(2000, self._clear_status)
         else:
-            self.status_text = "no previous search"
+            self.status_text = "no previous search  (use ff to open search)"
             QTimer.singleShot(2000, self._clear_status)
 
     def keyReleaseEvent(self, ev):
@@ -3690,17 +3848,10 @@ class ReaderWidget(QWidget):
             self._margin_key_held = False
         super().keyReleaseEvent(ev)
 
-    def mouseMoveEvent(self, ev):
-        pos  = ev.pos()
-        mr   = self._margin_rect()
-        side = self._margin_side()
-        near = pos.x() >= mr.left() - 10 if side == "right" else pos.x() <= mr.right() + 10
-        if near != self._margin_hover:
-            self._margin_hover = near
-        super().mouseMoveEvent(ev)
-
     def leaveEvent(self, ev):
         self._margin_hover = False
+        self._top_dropdown = None
+        self._top_dd_hover = None
         super().leaveEvent(ev)
 
     def wheelEvent(self, ev: QWheelEvent):
@@ -3727,11 +3878,25 @@ class ReaderWidget(QWidget):
     def mousePressEvent(self, ev: QMouseEvent):
         if ev.button() == Qt.MouseButton.LeftButton:
             pos = ev.pos()
-            # Close button
-            if getattr(self, '_close_btn_rect', None) and self._close_btn_rect.contains(pos):
-                from PyQt6.QtWidgets import QApplication as _QApp
-                _QApp.quit()
-                return
+
+            # Close dropdown on click outside
+            if self._top_dropdown:
+                # Check if click is in a dropdown item
+                for item_key, r in self._top_dd_rects.items():
+                    if r.contains(pos):
+                        self._handle_dropdown_item(item_key)
+                        return
+                # Click outside — close dropdown
+                self._top_dropdown = None
+                self.update()
+                # Don't return — might also be clicking a button
+
+            # Top bar buttons
+            for name, r in self._top_btn_rects.items():
+                if r.contains(pos):
+                    self._handle_top_btn(name)
+                    return
+
             # Annotation panel click-to-jump
             if self.panel:
                 for rect, line_idx in self._panel_rects:
@@ -3742,6 +3907,87 @@ class ReaderWidget(QWidget):
                         self.update()
                         return
         super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        pos  = ev.pos()
+        mr   = self._margin_rect()
+        side = self._margin_side()
+        near = pos.x() >= mr.left() - 10 if side == "right" else pos.x() <= mr.right() + 10
+        if near != self._margin_hover:
+            self._margin_hover = near
+
+        # Dropdown hover tracking
+        if self._top_dropdown:
+            hover = None
+            for item_key, r in self._top_dd_rects.items():
+                if r.contains(pos):
+                    hover = item_key
+                    break
+            if hover != self._top_dd_hover:
+                self._top_dd_hover = hover
+                self.update()
+        super().mouseMoveEvent(ev)
+
+    def _handle_top_btn(self, name: str):
+        """Handle a top bar button click."""
+        if name in ("metar", "menu"):
+            self._top_dropdown = name if self._top_dropdown != name else None
+            self._top_dd_hover = None
+            self.update()
+            return
+        if name == "close":
+            from PyQt6.QtWidgets import QApplication as _QApp
+            _QApp.quit(); return
+        if name == "invert":
+            _pdf_invert_ref[0] = not _pdf_invert_ref[0]
+            if self.document:
+                self.history._entry(self.document.filepath)["pdf_invert"] = _pdf_invert_ref[0]
+                self.history._save()
+            self.update(); return
+        if name == "search":
+            self._enter_command_mode()
+            self.cmd.setText(":sn ")
+            self.cmd.setCursorPosition(len(self.cmd.text()))
+            return
+        if not self.document: return
+        if name == "add_bm":    self._run("b"); return
+        if name == "rem_bm":    self._run("rb"); return
+        if name == "add_note":
+            self._enter_command_mode()
+            self.cmd.setText(":n ")
+            self.cmd.setCursorPosition(len(self.cmd.text()))
+            return
+        if name == "rem_note":  self._run("rn"); return
+        if name == "add_audio": self._run("an"); return
+        if name == "rem_audio": self._run("ran"); return
+        if name == "add_hl":    self._run("hl"); return
+        if name == "rem_hl":    self._run("rhl"); return
+
+    def _handle_dropdown_item(self, item_key: str):
+        """Handle a dropdown menu item click. item_key = 'which:key:label'"""
+        self._top_dropdown = None
+        self._top_dd_hover = None
+        parts = item_key.split(":", 2)
+        if len(parts) < 2: self.update(); return
+        which, key = parts[0], parts[1]
+
+        if which == "metar":
+            if key == "bookmarks":   self._open_annot_panel("bookmarks")
+            elif key == "notes":     self._open_annot_panel("notes")
+            elif key == "highlights":self._open_annot_panel("highlights")
+            elif key == "audio":     self._open_annot_panel("audionotes")
+        elif which == "menu":
+            if key == "library":     self.window().show_library()
+            elif key == "settings":  self._open_settings_wizard()
+            elif key == "export":    self._run("e")
+            elif key == "abandon":
+                self._pending = {"action": "abandon"}
+                self.status_text = "Abandon this book?  Y to confirm  N to cancel"
+                self.update()
+            elif key == "close":
+                from PyQt6.QtWidgets import QApplication as _QApp
+                _QApp.quit()
+        self.update()
 
     # --------------------------------------------------------- navigation
 
