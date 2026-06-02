@@ -4215,9 +4215,8 @@ class ReaderWidget(QWidget):
         ext      = os.path.splitext(fp)[1].lower()
         doc_type = {".epub":"EBOOK",".mobi":"EBOOK",".cbz":"EBOOK",".fb2":"EBOOK"}.get(ext, "PDF")
 
-        MARQUEE = [">      ", " >     ", "  >    ", "   >   ",
-                   "    >  ", "     > ", "      >", ">>>>>>>"]
-        mq = MARQUEE[frame % 8]
+        MARQUEE_W = 8
+        mq = " " * (frame % MARQUEE_W) + ">" + " " * (MARQUEE_W - 1 - (frame % MARQUEE_W))
 
         # Which phase is active
         render_active = render_frac < 1.0
@@ -4506,7 +4505,8 @@ class ReaderWidget(QWidget):
 
     def _paint_define_overlay(self, painter: QPainter):
         """Draw the definition overlay box — taller than translate to fit full definitions."""
-        ANIM  = [' >>>', '> >>', '>> >', '>>> ']
+        def _mq(f): return ' ' * (f % 8) + '>' + ' ' * (7 - f % 8)
+        ANIM  = [_mq(i) for i in range(4)]
         font  = _ui_font(10, bold=True)
         font_r= _ui_font(10)
         fm    = QFontMetrics(font)
@@ -4804,7 +4804,7 @@ class ReaderWidget(QWidget):
 
     def _paint_ai_result_panel(self, painter: QPainter):
         """Paint the AI result panel — bottom 25% of PDF viewport only."""
-        ANIM   = [' >>>', '> >>', '>> >', '>>> ']
+        ANIM   = [' ' * (i % 8) + '>' + ' ' * (7 - i % 8) for i in range(8)]
         vp     = self._vp()
         ph     = vp.height() // 4
         panel  = QRect(vp.left(), vp.bottom() - ph, vp.width(), ph)
@@ -4869,7 +4869,7 @@ class ReaderWidget(QWidget):
 
     def _paint_translate_overlay(self, painter: QPainter):
         """Draw the translation overlay box above the current word or line."""
-        ANIM = [' >>>', '> >>', '>> >', '>>> ']
+        ANIM = [' ' * (i % 8) + '>' + ' ' * (7 - i % 8) for i in range(8)]
         font   = _ui_font(10, bold=True)
         fm     = QFontMetrics(font)
         vp     = self._vp()
